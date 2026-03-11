@@ -1,0 +1,78 @@
+# ============================================================
+# SKYWATCH — Sistem Konfigürasyonu
+# Tüm ayarlar bu tek dosyada yönetilir.
+# ============================================================
+
+# --- Kamera Ayarları ---
+cameras:
+  - id: "CAM_01"
+    name: "Ana Giriş"
+    source: "C:/Users/musta/OneDrive/Desktop/SKYWATCH/Video1.webm"
+    location: "Bina A — Giriş"
+    region: "BOLGE_A"
+    neighbors: []
+
+  # Yeni kamera eklemek için aşağıdaki şablonu kopyala:
+  # - id: "CAM_02"
+  #   name: "Koridor"
+  #   source: "rtsp://192.168.1.100:554/stream"
+  #   location: "Bina A — Koridor"
+  #   region: "BOLGE_A"
+  #   neighbors: ["CAM_01"]
+
+# --- Bölge Tanımları ---
+regions:
+  BOLGE_A:
+    name: "Ana Bina"
+  BOLGE_B:
+    name: "Dış Alan"
+    cameras: ["CAM_03"]
+
+# --- Yüz Tanıma Ayarları ---
+face:
+  recognition_model: "buffalo_l"
+  similarity_threshold: 0.45             # Cosine similarity eşiği
+  min_face_size: 30                      # Minimum yüz boyutu (piksel)
+  scan_interval_ms: 500                  # Tarama aralığı (ms)
+
+# --- DeepSORT Tracking Ayarları ---
+tracking:
+  max_age: 30                            # Track kaybolma süresi (frame)
+  min_hits: 3                            # Minimum tespit sayısı
+  iou_threshold: 0.3                     # IOU eşleşme eşiği
+
+# --- Kameralar Arası Takip ---
+cross_camera:
+  enabled: true
+  exit_buffer_seconds: 30                # Çıkan kişiyi kaç sn hatırla
+  similarity_threshold: 0.45             # Cross-camera eşleşme eşiği
+
+# --- Hareket Analizi ---
+movement:
+  speed_threshold_fast: 50               # Hızlı hareket (px/frame)
+  speed_threshold_running: 100           # Koşma (px/frame)
+  dwell_time_threshold: 120              # Şüpheli bekleme süresi (sn)
+  direction_change_threshold: 90         # Ani yön değişimi (derece)
+
+# --- Veritabanı ---
+database:
+  path: "database/skywatch.db"
+  photos_dir: "database/photos/"
+
+# --- Aktif Arama ---
+search:
+  max_concurrent_cameras: 4
+  timeout_minutes: 30
+  auto_expand_neighbors: true            # Bulunduğunda komşu kameraları tara
+
+# --- Log & Bildirim ---
+logging:
+  log_dir: "logs/"
+  log_file: "logs/events.log"
+  save_detection_screenshots: true
+  screenshot_dir: "logs/detections/"
+
+# --- Bildirim ---
+notifications:
+  sound_alarm: true
+  popup_alert: true
