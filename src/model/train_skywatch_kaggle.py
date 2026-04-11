@@ -32,7 +32,7 @@ CHECKPOINT_DIR = WORKING / "checkpoints"            # Zip checkpoint dizini
 GITHUB_REPO   = "https://github.com/mustafabsnl/SKYWATCH.git"  # ← GitHub adresiniz
 
 # Model YAML (repo içindeki yol)
-MODEL_YAML    = REPO_DIR / "ultralytics_skywatch/ultralytics/cfg/models/skywatch/skywatch-det.yaml"
+MODEL_YAML    = REPO_DIR / "src/ultralytics_patch/cfg/models/skywatch/skywatch-det.yaml"
 DATA_YAML     = DATA_YOLO / "data.yaml"
 
 # Her kaç epoch'ta ZIP alınsın
@@ -132,7 +132,7 @@ PHASE2 = dict(
 # ══════════════════════════════════════════════════════════
 
 def setup():
-    """Repo clone + path + kütüphane kurulumu."""
+    """Repo clone + kaggle_setup.py kontrolu + path kurulumu."""
     print("\n" + "="*55)
     print("  ORTAM KURULUMU")
     print("="*55)
@@ -144,13 +144,18 @@ def setup():
     else:
         print(f"  Repo mevcut: {REPO_DIR}")
 
-    # ultralytics_skywatch'u kur (custom modüller dahil)
-    ult_dir = REPO_DIR / "ultralytics_skywatch"
-    subprocess.run([sys.executable, "-m", "pip", "install", "-e", str(ult_dir), "-q"], check=True)
-
     # Path'e ekle
     sys.path.insert(0, str(REPO_DIR))
-    sys.path.insert(0, str(ult_dir))
+    sys.path.insert(0, str(REPO_DIR / "src" / "model"))
+
+    # kaggle_setup.py calistir (C2f_CAM, FRM patch + YAML)
+    setup_script = REPO_DIR / "kaggle_setup.py"
+    if setup_script.exists():
+        result = subprocess.run([sys.executable, str(setup_script)], capture_output=False)
+        if result.returncode != 0:
+            print("  [UYARI] kaggle_setup.py hata verdi, devam ediliyor...")
+    else:
+        print("  [UYARI] kaggle_setup.py bulunamadi!")
 
     # GPU kontrol
     import torch
@@ -158,12 +163,12 @@ def setup():
     print(f"  GPU: {n}x {torch.cuda.get_device_name(0) if n>0 else 'YOK'}")
     print(f"  PyTorch: {torch.__version__}")
 
-    # Custom modulleri kaydet
-    from ultralytics.nn import modules
-    print("  Custom moduller yuklendi (C2f_CAM, FRM)")
-
-    # checkpoint_zipper'i import et
-    sys.path.insert(0, str(REPO_DIR / "src" / "model"))
+    # Dogrula
+    try:
+        from ultralytics.nn.modules import C2f_CAM, FRM
+        print("  Custom moduller aktif (C2f_CAM, FRM)")
+    except ImportError as e:
+        print(f"  [HATA] Custom modul yuklenemedi: {e}")
 
     return n  # GPU sayisi
 
