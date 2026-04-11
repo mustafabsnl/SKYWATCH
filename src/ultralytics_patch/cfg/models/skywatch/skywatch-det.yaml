@@ -40,46 +40,40 @@ backbone:
   - [-1, 1, Conv,  [1024, 3, 2]]         # 7 — P5/32  (20x20)
   - [-1, 2, C3k2,  [1024, True]]         # 8
   - [-1, 1, SPPF,  [1024, 5]]            # 9  — SPPF
-  - [-1, 2, C2PSA, [1024]]               # 10 — P5 with attention
-
-  # Feature Refinement Module — placed after backbone
-  # Dilated convs recover edge info lost in blurry surveillance frames
-  # Source: "Face Detection in Low-quality Images via Deep Feature Enhancement"
-  - [-1, 1, FRM, [1024]]                 # 11 — Refined P5 features
+  - [-1, 2, C2PSA, [1024]]               # 10 — P5 with attention (backbone output)
 
 # ──────────────────────────────────────────────
 # Head — Top-down (P5→P4→P3→P2) + Bottom-up (P2→P3→P4→P5)
 # ──────────────────────────────────────────────
 head:
   # ── Top-down path ──────────────────────────
-  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]  # 12 — Upsample P5
-  - [[-1, 6], 1, Concat,  [1]]                  # 13 — cat backbone P4 (layer 6)
-  - [-1, 2, C3k2,  [512, False]]                # 14 — P4 neck
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]  # 11 — Upsample P5
+  - [[-1, 6], 1, Concat,  [1]]                  # 12 — cat backbone P4 (layer 6)
+  - [-1, 2, C3k2,  [512, False]]                # 13 — P4 neck
 
-  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]  # 15 — Upsample P4
-  - [[-1, 4], 1, Concat,  [1]]                  # 16 — cat backbone P3 (layer 4)
-  - [-1, 2, C3k2,  [256, False]]                # 17 — P3 neck
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]  # 14 — Upsample P4
+  - [[-1, 4], 1, Concat,  [1]]                  # 15 — cat backbone P3 (layer 4)
+  - [-1, 2, C3k2,  [256, False]]                # 16 — P3 neck
 
-  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]  # 18 — Upsample P3 → P2 scale
-  - [[-1, 2], 1, Concat,  [1]]                  # 19 — cat backbone P2 (layer 2)
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]  # 17 — Upsample P3 → P2 scale
+  - [[-1, 2], 1, Concat,  [1]]                  # 18 — cat backbone P2 (layer 2)
   # C2f_CAM: P2 level with contextual attention — critical for small faces
-  # Source: "Contextual Feature Enhancement for Small Face Detection in Crowded Scenes"
-  - [-1, 2, C2f_CAM, [128, False]]              # 20 — P2 with contextual attention ★
+  - [-1, 2, C2f_CAM, [128, False]]              # 19 — P2 with contextual attention ★
 
   # ── Bottom-up path ─────────────────────────
-  - [-1, 1, Conv,  [128, 3, 2]]                 # 21 — Downsample P2 → P3
-  - [[-1, 17], 1, Concat, [1]]                  # 22 — cat head P3 (layer 17)
-  - [-1, 2, C3k2,  [256, False]]                # 23 — P3 output
+  - [-1, 1, Conv,  [128, 3, 2]]                 # 20 — Downsample P2 → P3
+  - [[-1, 16], 1, Concat, [1]]                  # 21 — cat head P3 (layer 16)
+  - [-1, 2, C3k2,  [256, False]]                # 22 — P3 output
 
-  - [-1, 1, Conv,  [256, 3, 2]]                 # 24 — Downsample P3 → P4
-  - [[-1, 14], 1, Concat, [1]]                  # 25 — cat head P4 (layer 14)
-  - [-1, 2, C3k2,  [512, False]]                # 26 — P4 output
+  - [-1, 1, Conv,  [256, 3, 2]]                 # 23 — Downsample P3 → P4
+  - [[-1, 13], 1, Concat, [1]]                  # 24 — cat head P4 (layer 13)
+  - [-1, 2, C3k2,  [512, False]]                # 25 — P4 output
 
-  - [-1, 1, Conv,  [512, 3, 2]]                 # 27 — Downsample P4 → P5
-  - [[-1, 11], 1, Concat, [1]]                  # 28 — cat refined P5 (layer 11)
-  - [-1, 2, C3k2,  [1024, True]]                # 29 — P5 output
+  - [-1, 1, Conv,  [512, 3, 2]]                 # 26 — Downsample P4 → P5
+  - [[-1, 10], 1, Concat, [1]]                  # 27 — cat P5 (layer 10)
+  - [-1, 2, C3k2,  [1024, True]]                # 28 — P5 output
 
   # ── Detection Head ─────────────────────────
   # Pose head: bounding box + 5 facial landmarks per detection
-  # P2 (20) detects tiny faces, P3 (23) small, P4 (26) medium, P5 (29) large
-  - [[20, 23, 26, 29], 1, Pose, [nc, kpt_shape]] # 30 — Pose(P2, P3, P4, P5)
+  # P2 (19) detects tiny faces, P3 (22) small, P4 (25) medium, P5 (28) large
+  - [[19, 22, 25, 28], 1, Pose, [nc, kpt_shape]] # 29 — Pose(P2, P3, P4, P5)
