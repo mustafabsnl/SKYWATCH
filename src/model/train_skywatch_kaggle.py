@@ -31,8 +31,10 @@ RUNS_DIR      = WORKING / "runs"
 CHECKPOINT_DIR = WORKING / "checkpoints"            # Zip checkpoint dizini
 GITHUB_REPO   = "https://github.com/mustafabsnl/SKYWATCH.git"  # ← GitHub adresiniz
 
-# Model YAML (repo içindeki yol)
-MODEL_YAML    = REPO_DIR / "src/ultralytics_patch/cfg/models/skywatch/skywatch-det.yaml"
+# Model YAML
+# NOT: skywatch-det.yaml parse_model kanal sorunlari nedeniyle devre disi.
+# yolo11s-pose.yaml ile egitim baslatilir, C2f_CAM entegrasyonu ayrica cozulur.
+MODEL_YAML    = "yolo11s-pose.yaml"   # Built-in ultralytics (garantili calisir)
 DATA_YAML     = DATA_YOLO / "data.yaml"
 
 # Her kaç epoch'ta ZIP alınsın
