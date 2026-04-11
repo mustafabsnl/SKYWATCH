@@ -1,0 +1,85 @@
+# ============================================================
+# SKYWATCH-Det — Custom YOLOv11s Face Detection Model
+# ============================================================
+# Base: YOLOv11s Backbone + Pose Head
+# Key changes vs standard YOLOv11s-pose:
+#   1. P2 detection head (4-scale: P2/P3/P4/P5) — small face focus
+#   2. C2f_CAM at P2 level — contextual attention for crowded scenes
+#   3. FRM block after backbone — feature refinement for blur/noise
+#   4. kpt_shape [5, 2] — 5 facial landmarks (eyes x2, nose, mouth x2)
+#   5. nc: 1 — single class: face
+#
+# Sources:
+#   - "Enhanced YOLO for Small Object Detection in Surveillance" (P2 head)
+#   - "Contextual Feature Enhancement for Small Face Detection" (C2f_CAM)
+#   - "Face Detection in Low-quality Images" (FRM)
+#   - "WIDER FACE Benchmark" (training strategy)
+#   - "Face Detection and Recognition Systems" (5-point landmarks)
+# ============================================================
+
+nc: 1             # number of classes — face only
+kpt_shape: [5, 2] # 5 keypoints: [left_eye, right_eye, nose, left_mouth, right_mouth], (x, y)
+
+scales:
+  # Only 's' scale is used for SKYWATCH-Det
+  # [depth, width, max_channels]
+  s: [0.50, 0.50, 1024]  # ~9.5M params — balanced speed/accuracy for Kaggle T4
+
+# ──────────────────────────────────────────────
+# YOLOv11s Backbone (unchanged)
+# ──────────────────────────────────────────────
+backbone:
+  # [from, repeats, module, args]
+  - [-1, 1, Conv,  [64, 3, 2]]           # 0 — P1/2   (320x320 @ 640 input)
+  - [-1, 1, Conv,  [128, 3, 2]]          # 1 — P2/4   (160x160)
+  - [-1, 2, C3k2,  [256, False, 0.25]]   # 2 — P2 features  ← saved for P2 head concat
+  - [-1, 1, Conv,  [256, 3, 2]]          # 3 — P3/8   (80x80)
+  - [-1, 2, C3k2,  [512, False, 0.25]]   # 4 — P3 features  ← saved for P3 head concat
+  - [-1, 1, Conv,  [512, 3, 2]]          # 5 — P4/16  (40x40)
+  - [-1, 2, C3k2,  [512, True]]          # 6 — P4 features  ← saved for P4 head concat
+  - [-1, 1, Conv,  [1024, 3, 2]]         # 7 — P5/32  (20x20)
+  - [-1, 2, C3k2,  [1024, True]]         # 8
+  - [-1, 1, SPPF,  [1024, 5]]            # 9  — SPPF
+  - [-1, 2, C2PSA, [1024]]               # 10 — P5 with attention
+
+  # Feature Refinement Module — placed after backbone
+  # Dilated convs recover edge info lost in blurry surveillance frames
+  # Source: "Face Detection in Low-quality Images via Deep Feature Enhancement"
+  - [-1, 1, FRM, [1024]]                 # 11 — Refined P5 features
+
+# ──────────────────────────────────────────────
+# Head — Top-down (P5→P4→P3→P2) + Bottom-up (P2→P3→P4→P5)
+# ──────────────────────────────────────────────
+head:
+  # ── Top-down path ──────────────────────────
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]  # 12 — Upsample P5
+  - [[-1, 6], 1, Concat,  [1]]                  # 13 — cat backbone P4 (layer 6)
+  - [-1, 2, C3k2,  [512, False]]                # 14 — P4 neck
+
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]  # 15 — Upsample P4
+  - [[-1, 4], 1, Concat,  [1]]                  # 16 — cat backbone P3 (layer 4)
+  - [-1, 2, C3k2,  [256, False]]                # 17 — P3 neck
+
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]  # 18 — Upsample P3 → P2 scale
+  - [[-1, 2], 1, Concat,  [1]]                  # 19 — cat backbone P2 (layer 2)
+  # C2f_CAM: P2 level with contextual attention — critical for small faces
+  # Source: "Contextual Feature Enhancement for Small Face Detection in Crowded Scenes"
+  - [-1, 2, C2f_CAM, [128, False]]              # 20 — P2 with contextual attention ★
+
+  # ── Bottom-up path ─────────────────────────
+  - [-1, 1, Conv,  [128, 3, 2]]                 # 21 — Downsample P2 → P3
+  - [[-1, 17], 1, Concat, [1]]                  # 22 — cat head P3 (layer 17)
+  - [-1, 2, C3k2,  [256, False]]                # 23 — P3 output
+
+  - [-1, 1, Conv,  [256, 3, 2]]                 # 24 — Downsample P3 → P4
+  - [[-1, 14], 1, Concat, [1]]                  # 25 — cat head P4 (layer 14)
+  - [-1, 2, C3k2,  [512, False]]                # 26 — P4 output
+
+  - [-1, 1, Conv,  [512, 3, 2]]                 # 27 — Downsample P4 → P5
+  - [[-1, 11], 1, Concat, [1]]                  # 28 — cat refined P5 (layer 11)
+  - [-1, 2, C3k2,  [1024, True]]                # 29 — P5 output
+
+  # ── Detection Head ─────────────────────────
+  # Pose head: bounding box + 5 facial landmarks per detection
+  # P2 (20) detects tiny faces, P3 (23) small, P4 (26) medium, P5 (29) large
+  - [[20, 23, 26, 29], 1, Pose, [nc, kpt_shape]] # 30 — Pose(P2, P3, P4, P5)
