@@ -49,12 +49,12 @@ def main():
     # 3) Custom dosyalari uzerine kopyala (patch)
     print("\n[3] Custom dosyalar kopyalaniyor (patch)...")
 
-    src_custom = REPO / "ultralytics_skywatch" / "ultralytics"
+    src_custom = REPO / "src" / "ultralytics_patch"
     patches = [
         # (kaynak, hedef)
-        (src_custom / "nn" / "modules" / "__init__.py",   ult_dir / "nn" / "modules" / "__init__.py"),
+        (src_custom / "nn" / "modules" / "__init__.py",      ult_dir / "nn" / "modules" / "__init__.py"),
         (src_custom / "nn" / "modules" / "skywatch_modules.py", ult_dir / "nn" / "modules" / "skywatch_modules.py"),
-        (src_custom / "nn" / "tasks.py",                  ult_dir / "nn" / "tasks.py"),
+        (src_custom / "nn" / "tasks.py",                     ult_dir / "nn" / "tasks.py"),
     ]
 
     for src, dst in patches:
