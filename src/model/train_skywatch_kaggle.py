@@ -45,7 +45,7 @@ CHECKPOINT_EVERY_N = 10
 PHASE1 = dict(
     epochs          = 100,
     imgsz           = 640,
-    batch           = 32,          # 2xT4: 16 per GPU (auto=-1 multi-GPU desteklemiyor)
+    batch           = 16,          # 2xT4: 8 per GPU (multi_scale OOM nedeniyle azaltildi)
     lr0             = 0.001,       # Başlangıç LR
     lrf             = 0.01,        # Final LR katsayısı (lr0 * lrf)
     momentum        = 0.937,
@@ -66,7 +66,7 @@ PHASE1 = dict(
     hsv_s           = 0.7,
     hsv_v           = 0.4,
     erasing         = 0.4,
-    multi_scale     = True,
+    multi_scale     = False,       # T4'te OOM yapiyor, devre disi
     close_mosaic    = 10,
     # Loss ağırlıkları
     box             = 7.5,
