@@ -1,8 +1,17 @@
 """
-WIDER FACE -> YOLO Pose Format Donusturucu
+WIDER FACE -> YOLO Detection Format Donusturucu
 
-WIDER FACE formatindan YOLO Pose formatina donusum yapar.
-YOLO Pose formati: class cx cy w h kp1x kp1y kp1v ... kp5x kp5y kp5v
+WIDER FACE formatindan YOLO Detection formatina donusum yapar.
+YOLO Detection formati: class cx cy w h  (5 sutun)
+
+WIDER FACE annotation formati:
+    # image_path
+    N_faces
+    x1 y1 w h blur expression illumination invalid occlusion pose
+
+YOLO Detection ciktisi:
+    0 cx cy w h
+
 
 WIDER FACE annotation formati:
     # image_path
@@ -43,9 +52,6 @@ import numpy as np
 # YOLO sınıf indeksi — sadece 1 sınıf var: yüz
 FACE_CLASS = 0
 
-# 5 landmark için görünürlük=0 (WIDER FACE'de landmark yok)
-# Format: x1 y1 v1  x2 y2 v2  x3 y3 v3  x4 y4 v4  x5 y5 v5
-EMPTY_LANDMARKS = "0 0 0 " * 5  # 15 değer: 5 kp × (x, y, visibility)
 
 # Küçük yüzleri filtrele (min piksel boyutu)
 MIN_FACE_SIZE = 5  # 5x5 pikselden küçük yüzleri atla
@@ -274,8 +280,8 @@ def convert_split(
             cx, cy, w_n, h_n = result
             stats["kept_faces"] += 1
 
-            # YOLO Pose formatı: class cx cy w h + 5 landmark (tümü 0)
-            label_lines.append(f"{FACE_CLASS} {cx:.6f} {cy:.6f} {w_n:.6f} {h_n:.6f} {EMPTY_LANDMARKS.strip()}")
+            # YOLO Detection formati: class cx cy w h  (5 sutun)
+            label_lines.append(f"{FACE_CLASS} {cx:.6f} {cy:.6f} {w_n:.6f} {h_n:.6f}")
 
         # Label dosyasını kaydet (yüz yoksa bile boş dosya oluştur)
         # Relative path'ten güvenli dosya adı oluştur
@@ -321,8 +327,6 @@ val: {val_path}
 
 nc: {nc}
 names: ['face']
-
-kpt_shape: [5, 2]
 """
     yaml_path = output_dir / "data.yaml"
     with open(yaml_path, "w", encoding="utf-8") as f:
