@@ -1,7 +1,33 @@
-# ── Model Dosyaları (boyutu çok büyük, GitHub'a gitmez) ─────────────
-models/
+# ══════════════════════════════════════════════════════
+# SKYWATCH .gitignore
+# GitHub'a sadece KOD gider, veri/model GITMEZ
+# ══════════════════════════════════════════════════════
 
-# ── Python ──────────────────────────────────────────────────────────
+# ── Veri Setleri (GB boyutunda) ─────────────────────
+VeriSeti/
+dataset_yolo/
+data/
+datasets/
+*.zip
+*.tar.gz
+*.tar
+*.7z
+
+# ── Model Ağırlıkları ────────────────────────────────
+models/
+*.pt
+*.pth
+*.onnx
+*.engine
+*.tflite
+*.torchscript
+checkpoints/
+
+# ── Ultralytics Eğitim Çıktıları ────────────────────
+runs/
+wandb/
+
+# ── Python ──────────────────────────────────────────
 __pycache__/
 *.py[cod]
 *.pyo
@@ -10,32 +36,64 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+*.egg
+.eggs/
+pip-log.txt
 
-# ── Sanal Ortam ──────────────────────────────────────────────────────
+# ── Sanal Ortam ──────────────────────────────────────
 venv/
 env/
 .env
+.venv/
+ENV/
 
-# ── Veritabanı ve Kişisel Veriler ───────────────────────────────────
+# ── Jupyter / Kaggle Notebook ────────────────────────
+.ipynb_checkpoints/
+*.ipynb
+
+# ── Veritabanı ve Kişisel Veriler ───────────────────
 database/skywatch.db
 database/photos/
 logs/
 *.log
 
-# ── Ekran Görüntüleri ────────────────────────────────────────────────
+# ── Ekran Görüntüleri / Video ────────────────────────
 logs/detections/
+*.webm
+*.mp4
+*.avi
+*.mov
 
-# ── IDE ─────────────────────────────────────────────────────────────
+# ── IDE ─────────────────────────────────────────────
 .vscode/
 .idea/
 *.swp
 *.swo
+*.sublime-project
+*.sublime-workspace
 
-# ── OS ──────────────────────────────────────────────────────────────
+# ── OS ──────────────────────────────────────────────
 .DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
 Thumbs.db
+ehthumbs.db
+desktop.ini
 
-# ── Test Videoları ───────────────────────────────────────────────────
-*.webm
-*.mp4
-*.avi
+# ── Geçici Dosyalar ──────────────────────────────────
+*.tmp
+*.bak
+*.orig
+*.rej
+.cache/
+tmp/
+
+# ── ultralytics_skywatch — Derleme Artıkları ────────
+ultralytics_skywatch/**/__pycache__/
+ultralytics_skywatch/**/*.pyc
+ultralytics_skywatch/**/*.egg-info/
+ultralytics_skywatch/build/
+ultralytics_skywatch/dist/
+# NOT: ultralytics_skywatch kaynak kodu GitHub'a GIDER ✅

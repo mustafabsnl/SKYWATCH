@@ -1,0 +1,11 @@
+# SKYWATCH — Face Detection Model Training Config
+# YOLO formatı (single class: face)
+
+path: C:/Users/musta/OneDrive/Desktop/SKYWATCH/archive
+
+train: images/train
+val: images/val
+
+nc: 1
+names:
+  0: face

@@ -7,7 +7,7 @@
 cameras:
   - id: "CAM_01"
     name: "Ana Giriş"
-    source: "C:/Users/musta/OneDrive/Desktop/SKYWATCH/Video1.webm"
+    source: 0    # 0 = laptop kamerası (webcam)
     location: "Bina A — Giriş"
     region: "BOLGE_A"
     neighbors: []
@@ -31,15 +31,15 @@ regions:
 # --- Yüz Tanıma Ayarları ---
 face:
   recognition_model: "buffalo_l"
-  similarity_threshold: 0.45             # Cosine similarity eşiği
-  min_face_size: 30                      # Minimum yüz boyutu (piksel)
-  scan_interval_ms: 500                  # Tarama aralığı (ms)
+  similarity_threshold: 0.3             # Dusuruldu (0.45 gercek dunyu icin cok kati)
+  min_face_size: 30                      # 30px altindaki yuzleri yoksay (telefon ekrani vb.)
+  scan_interval_ms: 500                  # Tarama araligi (ms)
 
 # --- DeepSORT Tracking Ayarları ---
 tracking:
-  max_age: 30                            # Track kaybolma süresi (frame)
-  min_hits: 3                            # Minimum tespit sayısı
-  iou_threshold: 0.3                     # IOU eşleşme eşiği
+  max_age: 10                            # Olu track hizla silinir (hayalet kutu onlemi)
+  min_hits: 2                            # Hizli onay (embedding kacirmamak icin)
+  iou_threshold: 0.4                     # Kalabalik sahneler icin IOU esigi
 
 # --- Kameralar Arası Takip ---
 cross_camera:

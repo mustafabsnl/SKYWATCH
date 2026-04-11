@@ -21,10 +21,16 @@ class Tracker:
         # Kamera ID → DeepSort instance
         self._trackers: dict[str, DeepSort] = {}
 
-        # Track ID → face_embedding (DB sorgusu sadece 1 kez yapılsın diye)
+        # Track ID → face_embedding (DB sorgusu sadece 1 kez yapilsin diye)
         self._known_embeddings: dict[int, np.ndarray] = {}
 
-        # Track ID → ilk kez mi görüldüğü (is_new flag)
+        # Track ID → criminal_match (bir kez eslestiyse sonraki framelerde de hatirla)
+        self._criminal_matches: dict[int, object] = {}
+
+        # Track ID → DB'de aranıp aranmadığı (embedding geç geldiyse tekrar ara)
+        self._searched_ids: set[int] = set()
+
+        # Track ID → ilk kez mi goruldugu (is_new flag)
         self._seen_ids: set[int] = set()
 
     def _get_or_create(self, camera_id: str) -> DeepSort:
@@ -82,38 +88,48 @@ class Tracker:
         # Track nesnelerine dönüştür
         results: list[Track] = []
 
-        # Detection → embedding eşleştirmesi için dict oluştur
-        # (DeepSort track'e atanan detection'ın indexini verir)
         for rt in raw_tracks:
             if not rt.is_confirmed():
                 continue
 
             track_id = rt.track_id
 
-            # Bbox [x1, y1, x2, y2] formatına çevir
+            # Bbox [x1, y1, x2, y2] formatina cevir
             ltrb = rt.to_ltrb()
             bbox = [int(ltrb[0]), int(ltrb[1]), int(ltrb[2]), int(ltrb[3])]
 
-            # İlk kez mi görülüyor?
+            # Ilk kez mi gorulüyor?
             is_new = track_id not in self._seen_ids
             if is_new:
                 self._seen_ids.add(track_id)
 
-            # Embedding'i kaydet — orijinal detection'dan al
-            if is_new and det_embeddings:
-                # Yeni track için en yakın detection'ın embedding'ini bul
+            # ── Embedding yakalama (HER frame'de dene, sadece is_new değil) ──
+            # min_hits=5 yüzünden is_new frame'inde algılama olmayabilir.
+            # Bu yüzden embedding'i ilk fırsatta yakala.
+            if track_id not in self._known_embeddings and det_embeddings:
                 best_emb = self._find_closest_embedding(bbox, faces)
                 if best_emb is not None:
                     self._known_embeddings[track_id] = best_emb
 
+            # ── needs_search: Embedding var ama henüz DB'de aranmadı ──
+            # is_new anında embedding yoktu ama sonradan yakalandıysa
+            # pipeline'a "beni ara" sinyali gönder
+            has_embedding = track_id in self._known_embeddings
+            never_searched = track_id not in self._searched_ids
+            needs_search = has_embedding and never_searched
+
+            if needs_search:
+                self._searched_ids.add(track_id)
+
             track = Track(
                 track_id=track_id,
                 bbox=bbox,
-                is_new=is_new,
+                is_new=is_new or needs_search,  # İlk kez VEYA henüz aranmamış
                 age=rt.age,
                 is_confirmed=True,
                 time_since_update=rt.time_since_update,
                 face_embedding=self._known_embeddings.get(track_id),
+                criminal_match=self._criminal_matches.get(track_id),
                 camera_id=camera_id
             )
             results.append(track)
@@ -151,10 +167,16 @@ class Tracker:
         return len([t for t in tracker.tracker.tracks if t.is_confirmed()])
 
     def reset(self, camera_id: str = None):
-        """Tracker'ı sıfırla. camera_id verilmezse tümünü sıfırla."""
+        """Tracker'i sifirla."""
         if camera_id:
             self._trackers.pop(camera_id, None)
         else:
             self._trackers.clear()
             self._known_embeddings.clear()
+            self._criminal_matches.clear()
+            self._searched_ids.clear()
             self._seen_ids.clear()
+
+    def set_criminal_match(self, track_id: int, match: object):
+        """Pipeline'dan cesitli frameler arasi esleme sonucunu kaydet."""
+        self._criminal_matches[track_id] = match

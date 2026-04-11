@@ -39,12 +39,12 @@ class FaceAnalyzer:
             providers=['CUDAExecutionProvider', 'CPUExecutionProvider']
         )
         
-        # PERFORMANS: 320x320 algılama boyutu (640x640'dan 4x hızlı)
-        self._det_size = (320, 320)
-        self.app.prepare(ctx_id=0, det_size=self._det_size)
+        # 640x640 algılama — kalite/hız dengesi
+        self._det_size = (640, 640)
+        self.app.prepare(ctx_id=0, det_size=self._det_size, det_thresh=0.5)
         
-        # Frame küçültme oranı (algılama için)
-        self._scale = 0.5
+        # Frame küçültme: 0.75 = %44 daha hızlı, kalite yeterli
+        self._scale = 0.75
 
     def detect_faces(self, frame: np.ndarray) -> list[FaceResult]:
         """Kameradan alınan bir kare (frame) içindeki tüm yüzleri algılar.
