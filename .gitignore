@@ -3,6 +3,29 @@
 # GitHub'a sadece KOD gider, veri/model GITMEZ
 # ══════════════════════════════════════════════════════
 
+# ── ultralytics_skywatch: Sadece custom dosyalar push edilir ──
+# Tum ultralytics fork'u gitignore'a al
+ultralytics_skywatch/ultralytics/models/
+ultralytics_skywatch/ultralytics/engine/
+ultralytics_skywatch/ultralytics/utils/
+ultralytics_skywatch/ultralytics/data/
+ultralytics_skywatch/ultralytics/hub/
+ultralytics_skywatch/ultralytics/solutions/
+ultralytics_skywatch/ultralytics/trackers/
+ultralytics_skywatch/ultralytics/optim/
+ultralytics_skywatch/ultralytics/assets/
+ultralytics_skywatch/**/__pycache__/
+ultralytics_skywatch/**/*.pyc
+ultralytics_skywatch/**/*.egg-info/
+ultralytics_skywatch/build/
+ultralytics_skywatch/dist/
+ultralytics_skywatch/docs/
+ultralytics_skywatch/docker/
+ultralytics_skywatch/examples/
+ultralytics_skywatch/tests/
+ultralytics_skywatch/.git/
+ultralytics_skywatch/.github/
+
 # ── Veri Setleri (GB boyutunda) ─────────────────────
 VeriSeti/
 dataset_yolo/
