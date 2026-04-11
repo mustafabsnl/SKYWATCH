@@ -68,6 +68,25 @@ class C2f_CAM(nn.Module):
             e (float): Genişleme oranı (hidden channels = c2 * e).
         """
         super().__init__()
+
+        # ── Savunmaci tip kontrolu ────────────────────────────────────
+        # parse_model bazen C2f_CAM'i bulmayip args'i yanlis sirayla
+        # gonderebilir (c2=False gibi bool gelirse duzelt)
+        if isinstance(c2, bool):
+            # Yanlis siralama: c1=128(yaml_out_ch), c2=False(shortcut)
+            # c1 aslinda YAML'dan gelen cikis kanali, c2=False=shortcut
+            shortcut = bool(c2)
+            c2 = int(c1)   # cikis kanali = giris kanali (pass-through)
+        if isinstance(n, bool):
+            shortcut = bool(n)
+            n = 1
+
+        # Tip guvenceleri
+        c1 = int(c1)
+        c2 = int(c2)
+        n  = max(int(n), 0)
+        e  = float(e)
+
         self.c = int(c2 * e)  # gizli kanal sayısı
 
         # ─── Standart C2f Bileşenleri ───────────────────────────────

@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import importlib
 from pathlib import Path
+from typing import Optional
 
 REPO = Path("/kaggle/working/SKYWATCH")
 SRC  = REPO / "src" / "ultralytics_patch"
@@ -60,7 +61,8 @@ def patch_init(ult_dir: Path):
 
 def patch_tasks(ult_dir: Path):
     """
-    tasks.py'ye C2f_CAM ve FRM'yi base_modules listesine ekle.
+    tasks.py'ye C2f_CAM ve FRM'yi parse_model'in C2f handling bloğuna ekle.
+    Regex ile class ismi eşleştirme kullanır (string literali değil).
     """
     tasks_path = ult_dir / "nn" / "tasks.py"
     content = tasks_path.read_text(encoding="utf-8")
@@ -69,27 +71,33 @@ def patch_tasks(ult_dir: Path):
         print("  tasks.py zaten patch'li, atlaniyor.")
         return
 
-    # base_modules listesini bul ve C2f_CAM, FRM ekle
-    # 'C2f' in the list ile basla
-    inject_import = "from ultralytics.nn.modules.skywatch_modules import C2f_CAM, FRM\n"
-
-    # Dosyanin basina import ekle
+    # 1) Import ekle (dosya basina)
+    inject_import = "from ultralytics.nn.modules.skywatch_modules import C2f_CAM, FRM"
     if inject_import not in content:
         lines = content.split("\n")
-        # ilk import satirinin ustune ekle
         for i, line in enumerate(lines):
             if line.startswith("import ") or line.startswith("from "):
-                lines.insert(i, inject_import.strip())
+                lines.insert(i, inject_import)
                 break
         content = "\n".join(lines)
 
-    # base_modules / repeat_modules listesine ekle
-    # "C2f," satirini bul, altina C2f_CAM ekle
-    if '"C2f"' in content and '"C2f_CAM"' not in content:
-        content = content.replace('"C2f",', '"C2f",\n        "C2f_CAM",\n        "FRM",', 1)
+    # 2) parse_model'in C2f handling setine C2f_CAM ve FRM ekle
+    # Pattern: 'C2f,' veya 'C2f ,' (class reference, string degil)
+    # \bC2f\b -> word boundary ile C2fAttn gibi diğer modülleri etkilemez
+    patched, count = re.subn(
+        r'\bC2f\b(?=\s*,)',   # C2f + virgül (C2fAttn, C2fCIB degil)
+        'C2f, C2f_CAM, FRM',
+        content,
+        count=1,             # sadece ilk oluşumu değiştir
+    )
+    if count:
+        content = patched
+        print("  C2f_CAM/FRM parse_model setine eklendi (class ref)")
+    else:
+        print("  UYARI: C2f regex match bulunamadi, import yeterli olacak")
 
     tasks_path.write_text(content, encoding="utf-8")
-    print("  OK: tasks.py -> C2f_CAM, FRM kayitlari eklendi")
+    print("  OK: tasks.py patch tamamlandi")
 
 
 def copy_yaml(ult_dir: Path):
