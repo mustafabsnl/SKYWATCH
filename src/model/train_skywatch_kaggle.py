@@ -270,20 +270,51 @@ def _find_or_create_data_yaml() -> Path:
 
 
 def _find_images_train_root() -> Path:
-    """images/train klasörünü içeren root dizini döndür."""
-    candidates = [
+    """images/train klasörünü içeren root dizini döndür.
+
+    kagglehub dataset yapısı değişkenlik gösterebilir:
+      - DATA_RAW/images/train/                    (düz yapı)
+      - DATA_RAW/wider_face_yolo/images/train/    (alt klasörlü)
+    Recursive olarak arar.
+    """
+    # Önce bilinen konumları dene (hızlı)
+    known = [
         DATA_RAW,
         DATA_RAW / "wider_face_yolo",
+        DATA_RAW / "data",
+        DATA_RAW / "dataset",
     ]
-    for root in candidates:
+    for root in known:
         train_dir = root / "images" / "train"
         if train_dir.exists() and any(train_dir.iterdir()):
             return root
+
+    # Bulunamazsa recursive tara (max 3 seviye derinlik)
+    print("  Recursive arama yapiliyor...")
+    for dirpath, dirnames, _ in os.walk(str(DATA_RAW)):
+        depth = str(dirpath).replace(str(DATA_RAW), "").count(os.sep)
+        if depth > 3:
+            dirnames.clear()  # daha derine gitme
+            continue
+        if "images" in dirnames:
+            images_path = Path(dirpath) / "images"
+            if (images_path / "train").exists():
+                print(f"  Bulundu: {dirpath}")
+                return Path(dirpath)
+
+    # Hata: mevcut yapiyi goster
+    print("\n  [HATA] Mevcut dizin yapisi:")
+    for dirpath, dirnames, _ in os.walk(str(DATA_RAW)):
+        depth = str(dirpath).replace(str(DATA_RAW), "").count(os.sep)
+        if depth > 2:
+            dirnames.clear()
+            continue
+        indent = "  " * depth
+        print(f"  {indent}{Path(dirpath).name}/")
     raise FileNotFoundError(
-        f"\n[HATA] images/train dizini bulunamadı!\n"
-        f"  Kaggle notebook'una şu dataset eklenmiş mi?\n"
-        f"  → lylmsc/wider-face-for-yolo-training\n"
-        f"  Aranan kök: {[str(c) for c in candidates]}"
+        f"\n[HATA] images/train dizini bulunamadi!\n"
+        f"  kagglehub path: {DATA_RAW}\n"
+        f"  Yukaridaki yapiyi kontrol edin."
     )
 
 
