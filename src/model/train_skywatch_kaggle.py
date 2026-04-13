@@ -246,41 +246,32 @@ def prepare_data():
 
 
 def _find_or_create_data_yaml() -> Path:
-    """Dataset icinde data.yaml bul; yoksa olustur.
+    """Dataset'e ait data.yaml'i her zaman tazeden olustur.
 
-    iamtushara/face-detection-dataset gercek yapisi:
+    KRITIK: Eski session'dan kalan /kaggle/working/skywatch_data/data.yaml
+    farkli bir dataset'e (eski WIDER FACE) ait olabilir. Bunu kullanma.
+    Her zaman DATA_RAW'i baz alarak taze olustur.
+
+    iamtushara/face-detection-dataset yapisi:
       merged/images/train/      [26,266 goruntu]
-      merged/images/validation/ [6,573 goruntu]  <- val/ degil!
-      merged/labels/train/
-      merged/labels/validation/
+      merged/images/validation/ [6,573 goruntu]
     """
-    candidates = [
-        DATA_RAW / "merged" / "data.yaml",
-        DATA_RAW / "dataset" / "data.yaml",
-        DATA_RAW / "data.yaml",
-        DATA_RAW / "dataset.yaml",
-        WORKING / "skywatch_data" / "data.yaml",
-    ]
-    for c in candidates:
-        if c.exists():
-            print(f"  YAML bulundu: {c}")
-            return _fix_data_yaml_paths(c)
-
-    # Bulunamazsa: images/ ve val_dir'i bul, data.yaml olustur
-    print("  data.yaml bulunamadi, olusturuluyor...")
     img_root = _find_images_train_root()
 
-    # val klasoru 'val' mi 'validation' mi?
-    val_dir = "images/val"
+    # val klasoru: 'validation' mi 'val' mi?
     if (img_root / "images" / "validation").exists():
         val_dir = "images/validation"
     elif (img_root / "images" / "val").exists():
         val_dir = "images/val"
+    else:
+        val_dir = "images/val"  # fallback
 
+    # Her zaman taze data.yaml olustur (eski session'dan kalan varsa uzerine yaz)
     yaml_path = WORKING / "skywatch_data" / "data.yaml"
     yaml_path.parent.mkdir(parents=True, exist_ok=True)
     yaml_content = (
-        f"# SKYWATCH-Det face-detection-dataset\n"
+        f"# SKYWATCH-Det — iamtushara/face-detection-dataset\n"
+        f"# Otomatik olusturuldu: {DATA_RAW}\n"
         f"path: {str(img_root).replace(chr(92), '/')}\n"
         f"train: images/train\n"
         f"val: {val_dir}\n\n"
@@ -288,10 +279,12 @@ def _find_or_create_data_yaml() -> Path:
         f"names: ['face']\n"
     )
     yaml_path.write_text(yaml_content, encoding="utf-8")
-    print(f"  Olusturuldu: {yaml_path}")
+    print(f"  data.yaml olusturuldu: {yaml_path}")
+    print(f"    path : {img_root}")
     print(f"    train: images/train")
     print(f"    val  : {val_dir}")
     return yaml_path
+
 
 
 def _fix_data_yaml_paths(yaml_path: Path) -> Path:
