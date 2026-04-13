@@ -53,7 +53,7 @@ CHECKPOINT_EVERY_N = 5
 PHASE1 = dict(
     epochs          = 100,
     imgsz           = 640,
-    batch           = 16,          # 2xT4: 8 per GPU (multi_scale OOM nedeniyle azaltildi)
+    batch           = 8,           # 2xT4: 4 per GPU — OOM olmasin (nbs=64 ile grad accum)
     lr0             = 0.001,       # Başlangıç LR
     lrf             = 0.01,        # Final LR katsayısı (lr0 * lrf)
     momentum        = 0.937,
