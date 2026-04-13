@@ -57,37 +57,32 @@ class C2f_CAM(nn.Module):
         g: int = 1,
         e: float = 0.5,
     ):
-        """C2f_CAM'ı başlat.
-
-        Args:
-            c1 (int): Giriş kanal sayısı.
-            c2 (int): Çıkış kanal sayısı.
-            n (int): Bottleneck blok sayısı.
-            shortcut (bool): Residual bağlantı kullanılıp kullanılmayacağı.
-            g (int): Gruplu konvolüsyon sayısı.
-            e (float): Genişleme oranı (hidden channels = c2 * e).
-        """
+        """C2f_CAM'ı başlat."""
         super().__init__()
 
         # ── Savunmaci tip kontrolu ────────────────────────────────────
-        # parse_model bazen C2f_CAM'i bulmayip args'i yanlis sirayla
-        # gonderebilir (c2=False gibi bool gelirse duzelt)
         if isinstance(c2, bool):
-            # Yanlis siralama: c1=128(yaml_out_ch), c2=False(shortcut)
-            # c1 aslinda YAML'dan gelen cikis kanali, c2=False=shortcut
             shortcut = bool(c2)
-            c2 = int(c1)   # cikis kanali = giris kanali (pass-through)
+            c2 = int(c1)
         if isinstance(n, bool):
             shortcut = bool(n)
             n = 1
 
-        # Tip guvenceleri
         c1 = int(c1)
         c2 = int(c2)
         n  = max(int(n), 0)
         e  = float(e)
 
-        self.c = int(c2 * e)  # gizli kanal sayısı
+        # ── Parametreleri sakla (forward-time auto-rebuild icin) ──────
+        # parse_model ultra versiyonuna gore yanlis c1 gonderebilir.
+        # forward() gercek input kanaline gore gerekirse rebuild yapar.
+        self._c2 = c2
+        self._n  = n
+        self._sc = shortcut
+        self._g  = g
+        self._e  = e
+
+        self.c = int(c2 * e)  # gizli kanal sayisi
 
         # ─── Standart C2f Bileşenleri ───────────────────────────────
         self.cv1 = Conv(c1, 2 * self.c, 1, 1)
@@ -98,9 +93,6 @@ class C2f_CAM(nn.Module):
         )
 
         # ─── Contextual Attention Branch ────────────────────────────
-        # Depthwise dilated conv (3x3, dilation=2) → efektif alan 5x5
-        # + Pointwise conv → kanal boyutunu koru
-        # Bu branch, yüzün etrafındaki omuz/kafa yapısını yakalar
         self.ctx_conv = nn.Sequential(
             nn.Conv2d(c2, c2, kernel_size=3, padding=2, dilation=2, groups=c2, bias=False),
             nn.Conv2d(c2, c2, kernel_size=1, bias=False),
@@ -109,32 +101,62 @@ class C2f_CAM(nn.Module):
         )
 
         # ─── Channel Attention (SE-block) ───────────────────────────
-        c_squeeze = max(c2 // 4, 8)  # squeeze boyutu (en az 8)
+        c_squeeze = max(c2 // 4, 8)
         self.channel_att = nn.Sequential(
-            nn.AdaptiveAvgPool2d(1),   # Global average pooling → (B, C, 1, 1)
-            nn.Flatten(),              # → (B, C)
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
             nn.Linear(c2, c_squeeze),
             nn.SiLU(inplace=True),
             nn.Linear(c_squeeze, c2),
-            nn.Sigmoid(),              # → (B, C) ağırlıklar [0, 1]
+            nn.Sigmoid(),
         )
+
+    # ─── Forward-time kanal düzeltmesi ──────────────────────────────
+    def _ensure_channels(self, x: torch.Tensor) -> None:
+        """parse_model yanlis c1 gonderdiyse ilk forward'da otomatik rebuild yap.
+
+        ultralytics parse_model, C2f_CAM'i tanimadiginda YAML args'i (128, False)
+        direkt gecebilir: c1=128, c2=False -> defensive check -> c1=c2=128.
+        Ama gercek input 256 kanal ise burada yakalanip duzeltilir.
+        Bu fix tasks.py patch'e BAGIMLI DEGILDIR.
+        """
+        actual_c1 = x.shape[1]
+        if actual_c1 == self.cv1.conv.in_channels:
+            return  # Kanal sayisi dogru, islem yok
+
+        # Yanlis c1 tespit edildi: rebuild
+        c2, n, e = self._c2, self._n, self._e
+        print(f"  [C2f_CAM] Auto-fix: c1 {self.cv1.conv.in_channels} -> {actual_c1} "
+              f"(c2={c2}, n={n})")
+
+        self.c   = int(c2 * e)
+        self.cv1 = Conv(actual_c1, 2 * self.c, 1, 1)
+        self.cv2 = Conv((2 + n) * self.c, c2, 1)
+        self.m   = nn.ModuleList(
+            Bottleneck(self.c, self.c, self._sc, self._g, k=((3, 3), (3, 3)), e=1.0)
+            for _ in range(n)
+        )
+        # ctx_conv ve channel_att c2 kullanir — c2 degismedi, rebuild gereksiz
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """İleri geçiş: C2f akışı + contextual attention."""
+        # parse_model yanlis c1 gonderdiyse otomatik duzelt
+        self._ensure_channels(x)
+
         # ── Standart C2f akışı ──
         y = list(self.cv1(x).chunk(2, 1))
         y.extend(m(y[-1]) for m in self.m)
         out = self.cv2(torch.cat(y, 1))  # (B, c2, H, W)
 
         # ── Contextual Attention ──
-        ctx = self.ctx_conv(out)                                     # (B, c2, H, W) — bağlamsal özellikler
-        w = self.channel_att(ctx).view(ctx.shape[0], ctx.shape[1], 1, 1)  # (B, c2, 1, 1) — kanal ağırlıkları
+        ctx = self.ctx_conv(out)
+        w = self.channel_att(ctx).view(ctx.shape[0], ctx.shape[1], 1, 1)
 
-        # Residual: orijinal + ağırlıklı bağlamsal özellikler
         return out + ctx * w
 
     def forward_split(self, x: torch.Tensor) -> torch.Tensor:
         """split() kullanan alternatif forward (chunk yerine)."""
+        self._ensure_channels(x)
         y = list(self.cv1(x).split((self.c, self.c), 1))
         y.extend(m(y[-1]) for m in self.m)
         out = self.cv2(torch.cat(y, 1))
