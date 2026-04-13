@@ -237,48 +237,60 @@ def prepare_data():
     print(f"  data.yaml: {DATA_YAML}")
 
     # Istatistik
-    for split in ("train", "val"):
+    for split in ("train", "val", "validation"):  # her ikisini dene
         img_dir = DATA_YAML.parent / "images" / split
         if img_dir.exists():
-            imgs = list(img_dir.glob("*.jpg")) + list(img_dir.glob("*.png"))
-            print(f"  {split:5s}: {len(imgs):,} goruntu")
-        else:
-            print(f"  {split:5s}: [UYARI] klasor bulunamadi: {img_dir}")
+            imgs = list(img_dir.glob("*.jpg")) + list(img_dir.glob("*.jpeg")) + list(img_dir.glob("*.png"))
+            label = "val" if split != "train" else "train"
+            print(f"  {label:5s}: {len(imgs):,} goruntu")
 
 
 def _find_or_create_data_yaml() -> Path:
     """Dataset icinde data.yaml bul; yoksa olustur.
 
-    iamtushara/face-detection-dataset icin olasi konumlar:
-      DATA_RAW/dataset/data.yaml
-      DATA_RAW/data.yaml
+    iamtushara/face-detection-dataset gercek yapisi:
+      merged/images/train/      [26,266 goruntu]
+      merged/images/validation/ [6,573 goruntu]  <- val/ degil!
+      merged/labels/train/
+      merged/labels/validation/
     """
     candidates = [
+        DATA_RAW / "merged" / "data.yaml",
         DATA_RAW / "dataset" / "data.yaml",
         DATA_RAW / "data.yaml",
         DATA_RAW / "dataset.yaml",
-        WORKING / "skywatch_data" / "data.yaml",  # onceki split'ten kalmis olabilir
+        WORKING / "skywatch_data" / "data.yaml",
     ]
     for c in candidates:
         if c.exists():
             print(f"  YAML bulundu: {c}")
-            # data.yaml icindeki relative path'leri mutlak yola cevir
             return _fix_data_yaml_paths(c)
 
-    # Bulunamazsa: images/train'i bul ve yeni data.yaml olustur
+    # Bulunamazsa: images/ ve val_dir'i bul, data.yaml olustur
     print("  data.yaml bulunamadi, olusturuluyor...")
     img_root = _find_images_train_root()
-    yaml_path = img_root / "data.yaml"
+
+    # val klasoru 'val' mi 'validation' mi?
+    val_dir = "images/val"
+    if (img_root / "images" / "validation").exists():
+        val_dir = "images/validation"
+    elif (img_root / "images" / "val").exists():
+        val_dir = "images/val"
+
+    yaml_path = WORKING / "skywatch_data" / "data.yaml"
+    yaml_path.parent.mkdir(parents=True, exist_ok=True)
     yaml_content = (
         f"# SKYWATCH-Det face-detection-dataset\n"
         f"path: {str(img_root).replace(chr(92), '/')}\n"
         f"train: images/train\n"
-        f"val: images/val\n\n"
+        f"val: {val_dir}\n\n"
         f"nc: 1\n"
         f"names: ['face']\n"
     )
     yaml_path.write_text(yaml_content, encoding="utf-8")
     print(f"  Olusturuldu: {yaml_path}")
+    print(f"    train: images/train")
+    print(f"    val  : {val_dir}")
     return yaml_path
 
 
@@ -321,8 +333,12 @@ def _fix_data_yaml_paths(yaml_path: Path) -> Path:
 
 
 def _find_images_train_root() -> Path:
-    """images/train klasorunu iceren root dizini dondur (recursive)."""
+    """images/train klasorunu iceren root dizini dondur (recursive).
+
+    iamtushara dataset: DATA_RAW/merged/images/train/
+    """
     known = [
+        DATA_RAW / "merged",       # iamtushara: merged/images/train/
         DATA_RAW / "dataset",
         DATA_RAW,
         WORKING / "skywatch_data",
@@ -343,7 +359,7 @@ def _find_images_train_root() -> Path:
     print(f"\n  Dizin yapisi ({DATA_RAW}):")
     for dirpath, dirnames, files in os.walk(str(DATA_RAW)):
         depth = str(dirpath).replace(str(DATA_RAW), "").count(os.sep)
-        if depth > 2:
+        if depth > 3:
             dirnames.clear()
             continue
         print(f"  {'  '*depth}{Path(dirpath).name}/ [{len(files)} dosya]")
