@@ -200,122 +200,156 @@ def download_dataset() -> Path:
         import kagglehub
 
     print(f"  Dataset indiriliyor: {DATASET_SLUG}")
-    print("  (Cache'de varsa anında hazır olur)")
+    print("  (Cache'de varsa aninda hazir olur)")
     raw_path = kagglehub.dataset_download(DATASET_SLUG)
     DATA_RAW = Path(raw_path)
-    print(f"  ✓ Dataset path: {DATA_RAW}")
+    print(f"  Dataset path: {DATA_RAW}")
     return DATA_RAW
 
 
 def prepare_data():
     """kagglehub ile dataset'i indir, DATA_YAML global'ini ayarla.
 
-    lylmsc/wider-face-for-yolo-training zaten YOLO formatında:
-      images/train/, images/val/, labels/train/, labels/val/
-    kagglehub cache'den yükler (zaten indirildiyse anında hazır).
+    lylmsc/wider-face-for-yolo-training YAPISI (gercek):
+      images/  [12,880 dosya - duz, train/val YOKU]
+      labels/  [12,880 dosya - duz, train/val YOKU]
+
+    Bu fonksiyon:
+      1. kagglehub ile indirir
+      2. Flat yapiyi tespit eder
+      3. %%90 train / %%10 val olarak boler (symlink - hizli)
+      4. data.yaml olusturur -> DATA_YAML global'ini ayarlar
     """
     global DATA_YAML
 
-    # 1. Dataset'i indir (veya cache'den yükle)
+    # 1. Dataset'i indir (veya cache'den yukle)
     download_dataset()
 
     print("\n" + "="*55)
-    print("  VERİ SETİ KONTROLÜ")
+    print("  VERI SETI KONTROLU")
     print("="*55)
     print(f"  Kaynak: {DATA_RAW}")
 
-    # 2. data.yaml bul veya oluştur
-    DATA_YAML = _find_or_create_data_yaml()
+    # 2. Yapiyi tespit et ve hazirla
+    images_dir = DATA_RAW / "images"
+    subdirs = [d for d in images_dir.iterdir() if d.is_dir()] if images_dir.exists() else []
+    is_flat = images_dir.exists() and len(subdirs) == 0
 
-    # İstatistik
+    if is_flat:
+        print("  Yapi: FLAT (train/val yok) -> otomatik bolunuyor...")
+        DATA_YAML = _split_flat_dataset()
+    else:
+        print("  Yapi: SPLIT (train/val mevcut) -> direkt kullaniliyor")
+        DATA_YAML = _create_data_yaml_for_split()
+
+    # Istatistik
     for split in ("train", "val"):
         img_dir = DATA_YAML.parent / "images" / split
         if img_dir.exists():
             imgs = list(img_dir.glob("*.jpg")) + list(img_dir.glob("*.png"))
-            print(f"  {split:5s}: {len(imgs):,} görüntü")
+            print(f"  {split:5s}: {len(imgs):,} goruntu")
 
-    print(f"  ✓ data.yaml: {DATA_YAML}")
+    print(f"  data.yaml: {DATA_YAML}")
 
 
-def _find_or_create_data_yaml() -> Path:
-    """dataset.yaml / data.yaml dosyasını bul; yoksa oluştur."""
-    # Dataset içinde olası YAML konumları
-    candidates = [
-        DATA_RAW / "dataset.yaml",
-        DATA_RAW / "data.yaml",
-        DATA_RAW / "wider_face_yolo" / "dataset.yaml",
-        DATA_RAW / "wider_face_yolo" / "data.yaml",
-    ]
-    for c in candidates:
-        if c.exists():
-            print(f"  YAML bulundu: {c}")
-            return c
+def _split_flat_dataset() -> Path:
+    """Flat dataset'i %%90 train / %%10 val olarak bol, symlink ile bagla.
 
-    # Bulunamazsa images/train'i baz alarak oluştur
-    img_root = _find_images_train_root()
-    yaml_path = img_root / "data.yaml"
+    Cikti: /kaggle/working/skywatch_data/
+      images/train/  <- symlink
+      images/val/    <- symlink
+      labels/train/  <- symlink
+      labels/val/    <- symlink
+      data.yaml
+    """
+    import random
+
+    SPLIT_DIR = WORKING / "skywatch_data"
+    data_yaml = SPLIT_DIR / "data.yaml"
+
+    # Zaten bolunmusse atla
+    train_dir = SPLIT_DIR / "images" / "train"
+    if data_yaml.exists() and train_dir.exists() and any(train_dir.iterdir()):
+        print(f"  Split data zaten hazir: {SPLIT_DIR}")
+        return data_yaml
+
+    images_src = DATA_RAW / "images"
+    labels_src = DATA_RAW / "labels"
+
+    # Tum gorsuntuleri listele
+    all_images = sorted(images_src.glob("*.jpg")) + sorted(images_src.glob("*.png"))
+    if not all_images:
+        raise FileNotFoundError(f"images/ klasorunde goruntu bulunamadi: {images_src}")
+
+    # %%90 / %%10 split (seed=42)
+    import random
+    random.seed(42)
+    shuffled = all_images[:]
+    random.shuffle(shuffled)
+    n_train = int(len(shuffled) * 0.9)
+    splits = {"train": shuffled[:n_train], "val": shuffled[n_train:]}
+    print(f"  Toplam: {len(all_images):,} goruntu")
+    print(f"  Train:  {len(splits['train']):,} | Val: {len(splits['val']):,}")
+
+    # Cikti dizinleri olustur
+    for split in ("train", "val"):
+        (SPLIT_DIR / "images" / split).mkdir(parents=True, exist_ok=True)
+        (SPLIT_DIR / "labels" / split).mkdir(parents=True, exist_ok=True)
+
+    # Symlink ile bagla (kopyalama yok -> hizli)
+    linked = 0
+    for split, img_list in splits.items():
+        for img_path in img_list:
+            stem = img_path.stem
+            dst_img = SPLIT_DIR / "images" / split / img_path.name
+            if not dst_img.exists():
+                os.symlink(str(img_path), str(dst_img))
+            lbl_src = labels_src / f"{stem}.txt"
+            dst_lbl = SPLIT_DIR / "labels" / split / f"{stem}.txt"
+            if lbl_src.exists() and not dst_lbl.exists():
+                os.symlink(str(lbl_src), str(dst_lbl))
+                linked += 1
+    print(f"  Symlink: {linked:,} label baglandi")
+
+    # data.yaml olustur
     yaml_content = (
-        f"# SKYWATCH-Det — WIDER FACE YOLO Dataset\n"
-        f"path: {str(img_root).replace(chr(92), '/')}\n"
+        f"# SKYWATCH-Det WIDER FACE YOLO\n"
+        f"path: {str(SPLIT_DIR).replace(chr(92), '/')}\n"
         f"train: images/train\n"
         f"val: images/val\n\n"
         f"nc: 1\n"
         f"names: ['face']\n\n"
         f"# lylmsc/wider-face-for-yolo-training\n"
-        f"# 32,203 images | ~393,703 faces | face size: 10px ~ 500px\n"
+        f"# {len(splits['train']):,} train | {len(splits['val']):,} val | face: 10px~500px\n"
     )
-    yaml_path.write_text(yaml_content, encoding="utf-8")
-    print(f"  data.yaml oluşturuldu: {yaml_path}")
-    return yaml_path
+    data_yaml.write_text(yaml_content, encoding="utf-8")
+    print(f"  data.yaml: {data_yaml}")
+    return data_yaml
 
 
-def _find_images_train_root() -> Path:
-    """images/train klasörünü içeren root dizini döndür.
-
-    kagglehub dataset yapısı değişkenlik gösterebilir:
-      - DATA_RAW/images/train/                    (düz yapı)
-      - DATA_RAW/wider_face_yolo/images/train/    (alt klasörlü)
-    Recursive olarak arar.
-    """
-    # Önce bilinen konumları dene (hızlı)
-    known = [
-        DATA_RAW,
-        DATA_RAW / "wider_face_yolo",
-        DATA_RAW / "data",
-        DATA_RAW / "dataset",
+def _create_data_yaml_for_split() -> Path:
+    """Train/val split'li dataset icin data.yaml bul veya olustur."""
+    candidates = [
+        DATA_RAW / "dataset.yaml",
+        DATA_RAW / "data.yaml",
+        WORKING / "skywatch_data" / "data.yaml",
     ]
-    for root in known:
-        train_dir = root / "images" / "train"
-        if train_dir.exists() and any(train_dir.iterdir()):
-            return root
-
-    # Bulunamazsa recursive tara (max 3 seviye derinlik)
-    print("  Recursive arama yapiliyor...")
-    for dirpath, dirnames, _ in os.walk(str(DATA_RAW)):
-        depth = str(dirpath).replace(str(DATA_RAW), "").count(os.sep)
-        if depth > 3:
-            dirnames.clear()  # daha derine gitme
-            continue
-        if "images" in dirnames:
-            images_path = Path(dirpath) / "images"
-            if (images_path / "train").exists():
-                print(f"  Bulundu: {dirpath}")
-                return Path(dirpath)
-
-    # Hata: mevcut yapiyi goster
-    print("\n  [HATA] Mevcut dizin yapisi:")
-    for dirpath, dirnames, _ in os.walk(str(DATA_RAW)):
-        depth = str(dirpath).replace(str(DATA_RAW), "").count(os.sep)
-        if depth > 2:
-            dirnames.clear()
-            continue
-        indent = "  " * depth
-        print(f"  {indent}{Path(dirpath).name}/")
-    raise FileNotFoundError(
-        f"\n[HATA] images/train dizini bulunamadi!\n"
-        f"  kagglehub path: {DATA_RAW}\n"
-        f"  Yukaridaki yapiyi kontrol edin."
-    )
+    for c in candidates:
+        if c.exists():
+            print(f"  YAML bulundu: {c}")
+            return c
+    # images/train'i bul ve yaml olustur
+    for root in [DATA_RAW, WORKING / "skywatch_data"]:
+        if (root / "images" / "train").exists():
+            yaml_path = root / "data.yaml"
+            yaml_content = (
+                f"path: {str(root).replace(chr(92), '/')}\n"
+                f"train: images/train\nval: images/val\n\n"
+                f"nc: 1\nnames: ['face']\n"
+            )
+            yaml_path.write_text(yaml_content, encoding="utf-8")
+            return yaml_path
+    raise FileNotFoundError("data.yaml ve images/train bulunamadi!")
 
 
 # ══════════════════════════════════════════════════════════
