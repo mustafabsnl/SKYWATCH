@@ -1,24 +1,31 @@
 # ============================================================
 # SKYWATCH-Det — Custom YOLOv11s Face Detection Model
 # ============================================================
-# Base: YOLOv11s Backbone + Pose Head
-# Key changes vs standard YOLOv11s-pose:
-#   1. P2 detection head (4-scale: P2/P3/P4/P5) — small face focus
+# Base: YOLOv11s Backbone + Detection Head (4-scale)
+# Dataset: WIDER FACE for YOLO (32,203 images, ~393K faces)
+#
+# Key architectural changes vs standard YOLOv11s:
+#   1. P2 detection head (4-scale: P2/P3/P4/P5)
+#      → Critical: dataset contains faces as small as 10x10px
 #   2. C2f_CAM at P2 level — contextual attention for crowded scenes
-#   3. FRM block after backbone — feature refinement for blur/noise
-#   4. kpt_shape [5, 2] — 5 facial landmarks (eyes x2, nose, mouth x2)
-#   5. nc: 1 — single class: face
+#      → Helps detect faces in dense groups (Hard difficulty)
+#   3. FRM block placement — feature refinement for blur/noise
+#      → Improves detection on low-quality surveillance frames
+#   4. nc: 1 — single class: face (YOLO class_id = 0)
+#
+# Training notes:
+#   - face sizes: 10px ~ 500px → scale invariance is critical
+#   - partial occlusion common → model learns partial faces
+#   - augmentation: mosaic + blur strongly recommended
 #
 # Sources:
 #   - "Enhanced YOLO for Small Object Detection in Surveillance" (P2 head)
 #   - "Contextual Feature Enhancement for Small Face Detection" (C2f_CAM)
 #   - "Face Detection in Low-quality Images" (FRM)
 #   - "WIDER FACE Benchmark" (training strategy)
-#   - "Face Detection and Recognition Systems" (5-point landmarks)
 # ============================================================
 
-nc: 1             # number of classes — face only
-kpt_shape: [5, 2] # 5 keypoints: [left_eye, right_eye, nose, left_mouth, right_mouth], (x, y)
+nc: 1             # number of classes — face only (WIDER FACE: class_id=0)
 
 scales:
   # Only 's' scale is used for SKYWATCH-Det
@@ -74,6 +81,9 @@ head:
   - [-1, 2, C3k2,  [1024, True]]                # 28 — P5 output
 
   # ── Detection Head ─────────────────────────
-  # Pose head: bounding box + 5 facial landmarks per detection
-  # P2 (19) detects tiny faces, P3 (22) small, P4 (25) medium, P5 (28) large
-  - [[19, 22, 25, 28], 1, Pose, [nc, kpt_shape]] # 29 — Pose(P2, P3, P4, P5)
+  # 4-scale detection: bbox only (no landmarks — WIDER FACE YOLO format)
+  # P2 (19): tiny faces  ≤ 20px  ← most critical for Hard difficulty
+  # P3 (22): small       20~60px
+  # P4 (25): medium      60~180px
+  # P5 (28): large       180px+
+  - [[19, 22, 25, 28], 1, Detect, [nc]]           # 29 — Detect(P2, P3, P4, P5)

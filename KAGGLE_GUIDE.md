@@ -1,17 +1,17 @@
-# SKYWATCH-Det — Kaggle Eğitim Kılavuzu (2 Fazlı Strateji)
+# SKYWATCH-Det — Kaggle Eğitim Kılavuzu
 
-## 📁 Dosya Yapısı
+## 📦 Kullanılan Dataset
 
-```
-SKYWATCH/
-├── src/model/
-│   ├── train_skywatch_kaggle.py    ← Ana eğitim scripti (2 faz)
-│   ├── wider_face_converter.py     ← Veri dönüştürücü
-│   └── verify_model.py             ← Model doğrulama
-└── ultralytics_skywatch/
-    └── ultralytics/cfg/models/skywatch/
-        └── skywatch-det.yaml       ← Model mimarisi
-```
+**`lylmsc/wider-face-for-yolo-training`**
+
+| Özellik | Değer |
+|---|---|
+| Görüntü Sayısı | 32,203 (train + val ayrılmış) |
+| Etiketli Yüz | ~393,703 |
+| Yüz Boyut Aralığı | 10px ~ 500px |
+| Format | YOLO Detection (`class cx cy w h`) |
+| Zorluk Seviyeleri | Easy / Medium / Hard (gömülü) |
+| Dönüşüm Gerekiyor mu? | ❌ Hayır — direkt kullanılır |
 
 ---
 
@@ -29,206 +29,215 @@ Faz 2 ─── Düşük LR (0.0002) ─────── 300 epoch + patience=
 |---|---|---|
 | **Epochs** | 100 | 300 |
 | **LR0** | 0.001 | 0.0002 |
-| **LRf** | 0.01 | 0.005 |
-| **Batch** | -1 (auto) | 8 |
+| **Batch** | 16 | 8 |
 | **Warmup** | 5 epoch | 1 epoch |
 | **Patience** | 50 | 80 |
 | **Mosaic** | 1.0 | 0.5 |
-| **Multi-scale** | Açık | Kapalı |
+| **Multi-scale** | ❌ (OOM riski) | ❌ |
+
+> 💡 `multi_scale=True` yapmak istersen batch'i 8'e düşür.
 
 ---
 
-## 🖥️ ADIM 1 — Yerel Veri Dönüşümü (Windows'ta)
+## 📐 Model Mimarisi
 
-WIDER FACE veri setini YOLO formatına dönüştür:
-
-```powershell
-cd C:\Users\musta\OneDrive\Desktop\SKYWATCH
-
-python src/model/wider_face_converter.py `
-    --wider_root "C:\Users\musta\OneDrive\Desktop\SKYWATCH\VeriSeti" `
-    --output_dir "C:\Users\musta\OneDrive\Desktop\SKYWATCH\dataset_yolo" `
-    --splits train val `
-    --min_face_size 5
-```
-
-**Beklenen çıktı:**
-```
-  Train: 12,880 görüntü, ~159,420 yüz
-  Val:   3,226 görüntü, ~39,708 yüz
-  data.yaml oluşturuldu
-```
+**SKYWATCH-Det** (`skywatch-det.yaml`)
+- 4-scale Detection Head: **P2 / P3 / P4 / P5**
+- P2 head: ≤20px yüzler (Hard difficulty için kritik)
+- **C2f_CAM**: Kalabalık sahnelerde contextual attention
+- **FRM**: Bulanık kamera görüntülerinde özellik iyileştirme
+- Tek sınıf: `face`
 
 ---
 
-## 🌐 ADIM 2 — GitHub'a Push
+## 📓 Kaggle Notebook Hücreleri
 
-```powershell
-cd C:\Users\musta\OneDrive\Desktop\SKYWATCH
-git add .
-git commit -m "feat: SKYWATCH-Det v1 — 2-phase training ready"
-git push origin main
-```
+### ⚙️ Hücre 0 — Notebook Ayarları
 
----
-
-## 📓 ADIM 3 — Kaggle Notebook Kurulumu
-
-### Notebook Ayarları
 | Ayar | Değer |
 |---|---|
 | **Accelerator** | GPU T4 × 2 |
-| **Internet** | On |
+| **Internet** | ✅ Açık (kagglehub için zorunlu) |
 | **Session** | 12 Hours |
 
-### WIDER FACE Dataseti Ekle
-1. Kaggle → Add Data → Search: **"wider face"**
-2. Dataset'i notebook'a ekle → `/kaggle/input/wider-face/`
+> ❌ Artık `+ Add Data` ile dataset eklemeye gerek yok.
+> `kagglehub.dataset_download()` scriptin içinde otomatik indirir.
 
 ---
 
-## 📓 Notebook Hücreleri
+### Hücre 1 — Repo Clone + Kurulum
 
-### Hücre 1 — Repo + Kurulum
 ```python
-import subprocess, sys
+import os, sys
 
-# SKYWATCH repo clone
+# 1. SKYWATCH repo'yu klonla
 !git clone https://github.com/mustafabsnl/SKYWATCH.git /kaggle/working/SKYWATCH
 
-# ultralytics_skywatch'u kur (custom modüller dahil)
-!pip install -e /kaggle/working/SKYWATCH/ultralytics_skywatch -q
+# 2. Custom modülleri kur (C2f_CAM, FRM, skywatch-det.yaml)
+!python /kaggle/working/SKYWATCH/kaggle_setup.py
 
-# Path ekle
+# 3. Path'e ekle
 sys.path.insert(0, '/kaggle/working/SKYWATCH')
-sys.path.insert(0, '/kaggle/working/SKYWATCH/ultralytics_skywatch')
+sys.path.insert(0, '/kaggle/working/SKYWATCH/src/model')
 
 print("✓ Kurulum tamamlandı")
 ```
 
-### Hücre 2 — Modeli Doğrula
+---
+
+### Hücre 2 — Ortam Doğrulama
+
 ```python
-!python /kaggle/working/SKYWATCH/src/model/verify_model.py
-# Beklenen: 4/4 test geçti 🚀
+import torch
+
+# GPU kontrolü
+n = torch.cuda.device_count()
+print(f"GPU: {n}x {torch.cuda.get_device_name(0)}")
+
+# Custom modül kontrolü
+from ultralytics.nn.modules import C2f_CAM, FRM
+print("✓ C2f_CAM & FRM yüklendi")
+
+# Dataset kontrolü
+import os
+p = "/kaggle/input/wider-face-for-yolo-training"
+print(f"Dataset: {os.path.exists(p)}")
+print("Train:", len(os.listdir(f"{p}/images/train")), "görüntü")
+print("Val  :", len(os.listdir(f"{p}/images/val")), "görüntü")
 ```
 
-### Hücre 3 — Veri Dönüşümü
-```python
-!python /kaggle/working/SKYWATCH/src/model/wider_face_converter.py \
-    --wider_root /kaggle/input/wider-face \
-    --output_dir /kaggle/working/skywatch_data \
-    --splits train val \
-    --min_face_size 5
+Beklenen çıktı:
+```
+GPU: 2x Tesla T4
+✓ C2f_CAM & FRM yüklendi
+Dataset: True
+Train: ~28000 görüntü
+Val  : ~4200 görüntü
 ```
 
-### Hücre 4 — FAZ 1 Eğitimi
+---
+
+### Hücre 3 — FAZ 1 Eğitimi (100 epoch)
+
 ```python
 !python /kaggle/working/SKYWATCH/src/model/train_skywatch_kaggle.py \
-    --phase 1 \
-    --skip_data_prep
+    --phase 1
 ```
 
-### Hücre 5 — FAZ 2 Fine-tune
+> Script otomatik olarak `dataset.yaml` / `data.yaml` bulur.
+> Eğer bulamazsa `/kaggle/input/wider-face-for-yolo-training/` altında oluşturur.
+
+---
+
+### Hücre 4 — FAZ 2 Fine-tune (300 epoch)
+
 ```python
-# Faz 1'in best.pt yolunu kontrol et
+# Faz 1 best.pt kontrolü
 import os
-phase1_best = "/kaggle/working/runs/skywatch_det_phase1/weights/best.pt"
-print(f"Faz 1 ağırlık: {phase1_best}")
-print(f"Mevcut mu: {os.path.exists(phase1_best)}")
+p1 = "/kaggle/working/runs/skywatch_det_phase1/weights/best.pt"
+print(f"Faz 1 ağırlık mevcut: {os.path.exists(p1)}")
 ```
 
 ```python
 !python /kaggle/working/SKYWATCH/src/model/train_skywatch_kaggle.py \
     --phase 2 \
-    --phase1_weights /kaggle/working/runs/skywatch_det_phase1/weights/best.pt \
     --skip_data_prep
-```
-
-### Hücre 6 — Tek Seferde Tüm Eğitim
-```python
-# Alternatif: 2 fazı arka arkaya çalıştır
-!python /kaggle/working/SKYWATCH/src/model/train_skywatch_kaggle.py \
-    --phase all \
-    --skip_data_prep
-```
-
-### Hücre 7 — Sonuçları Kaydet
-```python
-import shutil
-from pathlib import Path
-
-# Faz 2 final modeli
-src = "/kaggle/working/runs/skywatch_det_phase2/weights/best.pt"
-dst = "/kaggle/working/skywatch-det-final.pt"
-
-if Path(src).exists():
-    shutil.copy(src, dst)
-    print(f"✓ Final model kaydedildi: {dst}")
-else:
-    # Faz 1 yeterli olduysa
-    src = "/kaggle/working/runs/skywatch_det_phase1/weights/best.pt"
-    shutil.copy(src, "/kaggle/working/skywatch-det-phase1.pt")
-    print("Faz 2 bulunamadı, Faz 1 kaydedildi")
 ```
 
 ---
 
-## ⚙️ Hiperparametre Açıklamaları
+### Hücre 5 — TEK SEFERDE Tüm Eğitim
 
-### Faz 1 — Neden bu değerler?
-| Param | Değer | Neden |
-|---|---|---|
-| `lr0=0.001` | Standart | AdamW için optimal başlangıç |
-| `batch=-1` | Auto | 2xT4 RAM'e göre otomatik |
-| `mosaic=1.0` | Tam | Küçük yüz öğrenimi için kritik |
-| `multi_scale=True` | Açık | 320-1280px varyasyon |
-| `patience=50` | Orta | Erken duraksama için |
+```python
+# Faz 1 + Faz 2 arka arkaya
+!python /kaggle/working/SKYWATCH/src/model/train_skywatch_kaggle.py \
+    --phase all
+```
 
-### Faz 2 — Neden bu değerler?
-| Param | Değer | Neden |
-|---|---|---|
-| `lr0=0.0002` | 5× düşük | Fine-tune overfitting engeller |
-| `lrf=0.005` | Çok küçük | LR neredeyse sabit kalır |
-| `epochs=300` | Yüksek | patience ile erken duracak |
-| `patience=80` | Yüksek | Daha uzun iyileşme şansı |
-| `warmup=1.0` | Minimal | Model zaten iyi başlıyor |
-| `mosaic=0.5` | Azaltıldı | Fine-tune'da daha temiz örnekler |
-| `multi_scale=False` | Kapalı | Sabit ölçek ile kararlı fine-tune |
+---
+
+### Hücre 6 — Final Modeli Kaydet
+
+```python
+import shutil
+from pathlib import Path
+
+candidates = [
+    ("/kaggle/working/runs/skywatch_det_phase2/weights/best.pt", "skywatch-det-final.pt"),
+    ("/kaggle/working/runs/skywatch_det_phase1/weights/best.pt", "skywatch-det-phase1.pt"),
+]
+
+for src, dst_name in candidates:
+    if Path(src).exists():
+        dst = f"/kaggle/working/{dst_name}"
+        shutil.copy(src, dst)
+        size_mb = Path(dst).stat().st_size / 1e6
+        print(f"✓ {dst_name} kaydedildi ({size_mb:.1f} MB)")
+        break
+```
 
 ---
 
 ## 📊 Beklenen Eğitim Süresi (2×T4)
 
-| Faz | Epoch | Süre |
+| Faz | Epoch | Tahmini Süre |
 |---|---|---|
-| Faz 1 | 100 | ~5-7 saat |
-| Faz 2 | 300 (patience=80) | ~6-10 saat |
-| **Toplam** | **~400 (erken durabilir)** | **~12-15 saat** |
+| Faz 1 | 100 | ~6–8 saat |
+| Faz 2 | 300 (patience=80) | ~10–15 saat |
+| **Toplam** | **~400** | **~16–22 saat** |
 
-> 💡 Kaggle 12 saatlik limitinde sığdırmak için: `--phase 1` çalıştır, kaydet, yeni oturumda `--phase 2` ile devam et.
+> 💡 **12 saat limitini aşmamak için:**
+> Oturum 1: `--phase 1` → Checkpoint'i indir
+> Oturum 2: `--phase 2 --skip_data_prep` → Fine-tune
 
 ---
 
 ## 🔧 Sorun Giderme
 
-### Kaggle'da WIDER FACE dizini bulunamadı
+### ❌ Dataset bulunamadı
 ```python
 import os
+# Kaggle'daki gerçek klasör adını kontrol et
 print(os.listdir('/kaggle/input/'))
-# Çıktıdaki gerçek ismi DATA_RAW değişkenine yaz:
-# train_skywatch_kaggle.py → DATA_RAW = Path("/kaggle/input/GERÇEK-İSİM")
+# Çıktıda 'wider-face-for-yolo-training' görünmüyorsa,
+# notebook'a dataset eklenmemiş demektir.
 ```
 
-### OOM (Out of Memory)
+### ❌ OOM (Out of Memory) Hatası
 ```python
-# train_skywatch_kaggle.py içinde PHASE2 batch değerini düşür:
-# batch = 8  →  batch = 4
+# train_skywatch_kaggle.py → PHASE1 içinde:
+# batch = 16  →  batch = 8
+# multi_scale = False  (zaten False)
 ```
 
-### Faz 2 best.pt bulunamadı
+### ❌ C2f_CAM / FRM bulunamadı
+```python
+# kaggle_setup.py'yi tekrar çalıştır:
+!python /kaggle/working/SKYWATCH/kaggle_setup.py
+```
+
+### ❌ Faz 2 best.pt bulunamadı
 ```python
 import glob
-# En son best.pt'yi bul
 files = glob.glob('/kaggle/working/runs/**/best.pt', recursive=True)
 print(files)
+# En son oluşturulan dosyayı --phase1_weights argümanına ver
+```
+
+---
+
+## 📁 Proje Yapısı (Eğitim İlgili)
+
+```
+SKYWATCH/
+├── kaggle_setup.py                     ← Custom modül kurulumu (C2f_CAM, FRM)
+└── src/
+    ├── model/
+    │   ├── train_skywatch_kaggle.py    ← 2 fazlı eğitim scripti
+    │   └── wider_face_converter.py     ← Artık kullanılmıyor (dataset hazır)
+    └── ultralytics_patch/
+        ├── nn/modules/
+        │   └── skywatch_modules.py     ← C2f_CAM + FRM implementasyonu
+        └── cfg/models/skywatch/
+            └── skywatch-det.yaml       ← 4-scale Detection mimarisi
 ```

@@ -3,28 +3,9 @@
 # GitHub'a sadece KOD gider, veri/model GITMEZ
 # ══════════════════════════════════════════════════════
 
-# ── ultralytics_skywatch: Sadece custom dosyalar push edilir ──
-# Tum ultralytics fork'u gitignore'a al
-ultralytics_skywatch/ultralytics/models/
-ultralytics_skywatch/ultralytics/engine/
-ultralytics_skywatch/ultralytics/utils/
-ultralytics_skywatch/ultralytics/data/
-ultralytics_skywatch/ultralytics/hub/
-ultralytics_skywatch/ultralytics/solutions/
-ultralytics_skywatch/ultralytics/trackers/
-ultralytics_skywatch/ultralytics/optim/
-ultralytics_skywatch/ultralytics/assets/
-ultralytics_skywatch/**/__pycache__/
-ultralytics_skywatch/**/*.pyc
-ultralytics_skywatch/**/*.egg-info/
-ultralytics_skywatch/build/
-ultralytics_skywatch/dist/
-ultralytics_skywatch/docs/
-ultralytics_skywatch/docker/
-ultralytics_skywatch/examples/
-ultralytics_skywatch/tests/
-ultralytics_skywatch/.git/
-ultralytics_skywatch/.github/
+# ── ultralytics_skywatch: Kaggle'da kaggle_setup.py île patch ediliyor ──
+# Bu klasöre artık gerek yok — tamamen dışarda bırak
+ultralytics_skywatch/
 
 # ── Veri Setleri (GB boyutunda) ─────────────────────
 VeriSeti/
@@ -37,7 +18,8 @@ datasets/
 *.7z
 
 # ── Model Ağırlıkları ────────────────────────────────
-models/
+/models/                   # Sadece kök /models/ klasörü (trained weights)
+# NOT: src/ultralytics_patch/cfg/models/ → KOD, gitignore'dan muaf
 *.pt
 *.pth
 *.onnx
@@ -80,12 +62,14 @@ database/photos/
 logs/
 *.log
 
-# ── Ekran Görüntüleri / Video ────────────────────────
+# ── Ekran Görüntüleri / Video / Büyük Binary ────────────────
 logs/detections/
 *.webm
 *.mp4
 *.avi
 *.mov
+# Rapor belgesi (büyük binary, git'te taşımak yoğuntur)
+SKYWATCH_RAPOR.docx
 
 # ── IDE ─────────────────────────────────────────────
 .vscode/
@@ -113,10 +97,18 @@ desktop.ini
 .cache/
 tmp/
 
-# ── ultralytics_skywatch — Derleme Artıkları ────────
+# ── ultralytics_skywatch — Derleme Artıkları ────────────────
+# (Klasörün tamamı zaten ↗’de dışlandı)
 ultralytics_skywatch/**/__pycache__/
 ultralytics_skywatch/**/*.pyc
 ultralytics_skywatch/**/*.egg-info/
 ultralytics_skywatch/build/
 ultralytics_skywatch/dist/
-# NOT: ultralytics_skywatch kaynak kodu GitHub'a GIDER ✅
+
+# ── Yerel Eğitim Çıktıları ────────────────────────────────
+src/model/runs/
+
+# Custom modeller ve özel dosyalar GitHub'a GİDER ✅
+# src/ultralytics_patch/  ← GIT'TE KALIR
+# src/model/              ← GIT'TE KALIR
+# kaggle_setup.py         ← GIT'TE KALIR
