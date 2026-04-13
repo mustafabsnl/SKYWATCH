@@ -44,8 +44,8 @@ GITHUB_REPO    = "https://github.com/mustafabsnl/SKYWATCH.git"
 MODEL_YAML     = "skywatch-det.yaml"
 DATA_YAML      = None   # prepare_data() tarafından belirlenir
 
-# Her kaç epoch'ta ZIP alınsın
-CHECKPOINT_EVERY_N = 10
+# Her kaç epoch'ta snapshot alinsin (klasor yapisi: snapshot_epoch_N/)
+CHECKPOINT_EVERY_N = 5
 
 # ══════════════════════════════════════════════════════════
 # FAZ 1 HİPERPARAMETRELERİ
@@ -63,7 +63,7 @@ PHASE1 = dict(
     warmup_bias_lr  = 0.1,
     optimizer       = "AdamW",
     patience        = 50,
-    save_period     = 10,
+    save_period     = 5,           # ultralytics epoch5.pt, epoch10.pt... kaydetsin
     # Augmentation — WIDER FACE: sokak kamerası simülasyonu
     # mosaic: kalabalık sahneler için kritik
     # blur varyasyonu: haar-like 'Hard' difficulty için
@@ -366,50 +366,114 @@ def _find_images_train_root() -> Path:
 # ══════════════════════════════════════════════════════════
 
 def start_zip_monitor(run_dir: Path, checkpoint_dir: Path,
-                       every_n: int = 10, interval: int = 90):
+                       every_n: int = 5, interval: int = 90):
     """
-    DDP ile uyumlu arka plan ZIP monitoru.
+    DDP ile uyumlu arka plan snapshot monitoru.
     model.train() blocking cagrisini beklerken results.csv'yi izler,
-    her N epoch'ta checkpoint ZIP'i olusturur.
-    """
-    import threading, csv, zipfile, time
+    her N epoch'ta tam snapshot klasoru olusturur:
 
-    def _zip_run(epoch: int):
+      checkpoint_dir/
+        snapshot_epoch_5/
+          weights/
+            best.pt
+            last.pt
+          args.yaml
+          results.csv
+          loss_curves.png / metric_curves.png / lr_curve.png
+          snapshot_summary.json
+          training_config.json
+    """
+    import threading, csv, shutil, time, json
+    import datetime as _dt
+
+    def _save_snapshot(epoch: int):
+        """Her N epoch'ta cagrilanarak tam snapshot klasoru olusturur."""
         try:
             checkpoint_dir.mkdir(parents=True, exist_ok=True)
-            ts = __import__('datetime').datetime.now().strftime('%H%M')
-            zip_path = checkpoint_dir / f"skywatch_epoch{epoch:04d}_{ts}.zip"
-            with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
-                for f in sorted(run_dir.rglob('*')):
-                    if f.is_file():
-                        zf.write(f, f.relative_to(run_dir.parent))
-            mb = zip_path.stat().st_size / 1e6
-            print(f"\n  [ZIP ✓] Epoch {epoch} → {zip_path.name} ({mb:.1f} MB)")
+            snap_dir = checkpoint_dir / f"snapshot_epoch_{epoch}"
+            snap_dir.mkdir(exist_ok=True)
+
+            # ── 1. weights/ kopyala ──────────────────────────────
+            w_src = run_dir / "weights"
+            w_dst = snap_dir / "weights"
+            w_dst.mkdir(exist_ok=True)
+            for wname in ["best.pt", "last.pt", f"epoch{epoch}.pt"]:
+                src = w_src / wname
+                if src.exists():
+                    shutil.copy2(src, w_dst / wname)
+
+            # ── 2. Metadata dosyalari ────────────────────────────
+            for fname in ["args.yaml", "results.csv"]:
+                src = run_dir / fname
+                if src.exists():
+                    shutil.copy2(src, snap_dir / fname)
+
+            # ── 3. PNG grafikler ─────────────────────────────────
+            for png in run_dir.glob("*.png"):
+                shutil.copy2(png, snap_dir / png.name)
+
+            # ── 4. snapshot_summary.json ─────────────────────────
+            metrics = {}
+            csv_path = run_dir / "results.csv"
+            if csv_path.exists():
+                with open(csv_path, newline='') as f:
+                    rows = list(csv.DictReader(f))
+                if rows:
+                    last = rows[-1]
+                    metrics = {k.strip(): v.strip() for k, v in last.items()}
+
+            summary = {
+                "epoch": epoch,
+                "timestamp": _dt.datetime.now().isoformat(),
+                "saved_weights": [p.name for p in w_dst.iterdir() if p.suffix == ".pt"],
+                "metrics": metrics,
+            }
+            with open(snap_dir / "snapshot_summary.json", "w") as f:
+                json.dump(summary, f, indent=2)
+
+            # ── 5. training_config.json ──────────────────────────
+            config = {
+                "model": str(MODEL_YAML),
+                "dataset": str(DATASET_SLUG),
+                "checkpoint_every_n": every_n,
+                "phase1": {k: str(v) if isinstance(v, Path) else v
+                           for k, v in PHASE1.items()},
+            }
+            with open(snap_dir / "training_config.json", "w") as f:
+                json.dump(config, f, indent=2)
+
+            # Boyut raporu
+            total_mb = sum(p.stat().st_size for p in snap_dir.rglob("*") if p.is_file()) / 1e6
+            n_weights = len(list(w_dst.glob("*.pt")))
+            print(f"\n  [SNAP ✓] snapshot_epoch_{epoch}/ "
+                  f"({n_weights} weight, {total_mb:.1f} MB)")
+
         except Exception as e:
-            print(f"\n  [ZIP HATA] Epoch {epoch}: {e}")
+            print(f"\n  [SNAP HATA] Epoch {epoch}: {e}")
+            import traceback; traceback.print_exc()
 
     def monitor():
-        last_zipped = 0
-        print(f"  [ZIP MON] Basladi — her {every_n} epoch'ta zip, {interval}s aralık")
+        last_snapped = 0
+        print(f"  [ZIP MON] Basladi — her {every_n} epoch'ta snapshot, {interval}s aralik")
         while True:
             try:
                 csv_path = run_dir / "results.csv"
                 if csv_path.exists():
                     with open(csv_path, newline='') as f:
-                        epoch_count = max(0, sum(1 for _ in csv.reader(f)) - 1)  # header sak
-                    if epoch_count > last_zipped and epoch_count % every_n == 0:
-                        # Weight dosyasinin yazilmasini bekle (max 30s)
+                        epoch_count = max(0, sum(1 for _ in csv.reader(f)) - 1)
+                    if epoch_count > last_snapped and epoch_count % every_n == 0:
+                        # Weight dosyasinin yazilmasini bekle (max 60s)
                         w = run_dir / "weights" / f"epoch{epoch_count}.pt"
                         waited = 0
-                        while not w.exists() and waited < 30:
-                            time.sleep(2); waited += 2
-                        _zip_run(epoch_count)
-                        last_zipped = epoch_count
+                        while not w.exists() and waited < 60:
+                            time.sleep(3); waited += 3
+                        _save_snapshot(epoch_count)
+                        last_snapped = epoch_count
             except Exception:
                 pass
             time.sleep(interval)
 
-    t = threading.Thread(target=monitor, daemon=True, name="ZipMonitor")
+    t = threading.Thread(target=monitor, daemon=True, name="SnapshotMonitor")
     t.start()
     return t
 
