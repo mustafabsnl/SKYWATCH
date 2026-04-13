@@ -89,6 +89,7 @@ print("✓ Kurulum tamamlandı")
 
 ```python
 import torch
+import os, kagglehub
 
 # GPU kontrolü
 n = torch.cuda.device_count()
@@ -98,21 +99,28 @@ print(f"GPU: {n}x {torch.cuda.get_device_name(0)}")
 from ultralytics.nn.modules import C2f_CAM, FRM
 print("✓ C2f_CAM & FRM yüklendi")
 
-# Dataset kontrolü
-import os
-p = "/kaggle/input/wider-face-for-yolo-training"
-print(f"Dataset: {os.path.exists(p)}")
-print("Train:", len(os.listdir(f"{p}/images/train")), "görüntü")
-print("Val  :", len(os.listdir(f"{p}/images/val")), "görüntü")
+# Dataset'i indir (veya cache'den yükle)
+print("\nDataset indiriliyor / cache kontrol ediliyor...")
+dataset_path = kagglehub.dataset_download("lylmsc/wider-face-for-yolo-training")
+print(f"✓ Dataset path: {dataset_path}")
+
+# İçerik doğrula
+for split in ("train", "val"):
+    d = os.path.join(dataset_path, "images", split)
+    if os.path.exists(d):
+        print(f"  {split}: {len(os.listdir(d)):,} görüntü")
+    else:
+        print(f"  [UYARI] {split} klasörü bulunamadı: {d}")
 ```
 
 Beklenen çıktı:
 ```
 GPU: 2x Tesla T4
 ✓ C2f_CAM & FRM yüklendi
-Dataset: True
-Train: ~28000 görüntü
-Val  : ~4200 görüntü
+Dataset indiriliyor / cache kontrol ediliyor...
+✓ Dataset path: /root/.cache/kagglehub/datasets/lylmsc/wider-face-for-yolo-training/versions/1
+  train: 28,000 görüntü
+  val  :  4,000 görüntü
 ```
 
 ---
