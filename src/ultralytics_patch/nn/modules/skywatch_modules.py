@@ -115,19 +115,30 @@ class C2f_CAM(nn.Module):
     def _ensure_channels(self, x: torch.Tensor) -> None:
         """parse_model yanlis c1 gonderdiyse ilk forward'da otomatik rebuild yap.
 
-        ultralytics parse_model, C2f_CAM'i tanimadiginda YAML args'i (128, False)
-        direkt gecebilir: c1=128, c2=False -> defensive check -> c1=c2=128.
-        Ama gercek input 256 kanal ise burada yakalanip duzeltilir.
-        Bu fix tasks.py patch'e BAGIMLI DEGILDIR.
+        SORUN:
+          parse_model (else branch) C2f_CAM'i tanimazsa:
+          - C2f_CAM init: c1=128 (YAML arg), c2=128 (defensive)
+          - parse_model CIKIS IZLEME: c2_tracked = c1_prev = 256
+          - C2f_CAM gercek cikis: 128 kanal
+          - Sonraki Conv: 256 kanal bekler, 128 gelir -> CRASH
+        
+        FIX:
+          Kanal uyumsuzlugu tespit edilince c2=actual_c1 ile rebuild yap.
+          Boylece C2f_CAM cikisi = parse_model'in izledigi deger (256).
+          Bu pass-through dimension tasarimi ile attention mekanizmasi korunur.
         """
         actual_c1 = x.shape[1]
         if actual_c1 == self.cv1.conv.in_channels:
             return  # Kanal sayisi dogru, islem yok
 
-        # Yanlis c1 tespit edildi: rebuild
-        c2, n, e = self._c2, self._n, self._e
-        print(f"  [C2f_CAM] Auto-fix: c1 {self.cv1.conv.in_channels} -> {actual_c1} "
-              f"(c2={c2}, n={n})")
+        # parse_model else branch: c2_tracked = c1_prev = actual_c1
+        # C2f_CAM cikisi = actual_c1 olmali (pass-through dimension)
+        c2 = actual_c1
+        n, e = self._n, self._e
+        self._c2 = c2  # Guncelle
+
+        print(f"  [C2f_CAM] Auto-rebuild: c1={actual_c1}, c2={c2} (n={n}) "
+              f"| eski cv1.in={self.cv1.conv.in_channels}")
 
         self.c   = int(c2 * e)
         self.cv1 = Conv(actual_c1, 2 * self.c, 1, 1)
@@ -136,7 +147,23 @@ class C2f_CAM(nn.Module):
             Bottleneck(self.c, self.c, self._sc, self._g, k=((3, 3), (3, 3)), e=1.0)
             for _ in range(n)
         )
-        # ctx_conv ve channel_att c2 kullanir — c2 degismedi, rebuild gereksiz
+
+        # ctx_conv ve channel_att YENI c2 ile de rebuild edilmeli
+        self.ctx_conv = nn.Sequential(
+            nn.Conv2d(c2, c2, kernel_size=3, padding=2, dilation=2, groups=c2, bias=False),
+            nn.Conv2d(c2, c2, kernel_size=1, bias=False),
+            nn.BatchNorm2d(c2),
+            nn.SiLU(inplace=True),
+        )
+        c_squeeze = max(c2 // 4, 8)
+        self.channel_att = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+            nn.Linear(c2, c_squeeze),
+            nn.SiLU(inplace=True),
+            nn.Linear(c_squeeze, c2),
+            nn.Sigmoid(),
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """İleri geçiş: C2f akışı + contextual attention."""
