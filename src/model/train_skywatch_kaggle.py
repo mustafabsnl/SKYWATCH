@@ -478,38 +478,47 @@ def start_zip_monitor(run_dir: Path, checkpoint_dir: Path,
     return t
 
 
+def _build_trainer(overrides: dict) -> "SkyWatchTrainer":
+    """SkyWatchTrainer için tek-nokta fabrika fonksiyonu.
+
+    Her iki fazda aynı trainer tipini ve davranışını garanti eder.
+    setup() sonrasında çağrılır (lazy import ile path bağımlılığını çözer).
+    """
+    from skywatch_trainer import SkyWatchTrainer
+    return SkyWatchTrainer(overrides=overrides)
+
+
+# ══════════════════════════════════════════════════════════
+# FAZ 1 EĞİTİM
+# ══════════════════════════════════════════════════════════
+
 def train_phase1(n_gpu: int) -> str:
     """Faz 1: Pretrained backbone'dan baslayarak normal LR egitimi."""
-    from ultralytics import YOLO
     from checkpoint_zipper import make_final_zip
 
     print("\n" + "="*55)
-    print("  FAZ 1 — Ilk Egitim")
+    print("  FAZ 1 — Ilk Egitim (SkyWatchTrainer)")
     print(f"  Epoch: {PHASE1['epochs']} | LR0: {PHASE1['lr0']} | Batch: {PHASE1['batch']}")
-    print(f"  ZIP her {CHECKPOINT_EVERY_N} epoch'ta: {CHECKPOINT_DIR / 'phase1'}")
+    print(f"  Snapshot her {CHECKPOINT_EVERY_N} epoch'ta: {CHECKPOINT_DIR / 'phase1'}")
     print("="*55)
 
-    model = YOLO(str(MODEL_YAML))
-
-    # Device ayari
-    device = "0,1" if n_gpu >= 2 else "0"
-
-    # ── DDP-uyumlu ZIP monitoru ─────────────────────────────────
-    # add_callback DDP subprocess'te calismaz → arka plan thread kullan
-    run_dir = RUNS_DIR / PHASE1["name"]
+    device   = "0,1" if n_gpu >= 2 else "0"
+    run_dir  = RUNS_DIR / PHASE1["name"]
     ckpt_dir = CHECKPOINT_DIR / "phase1"
+
+    # DDP-uyumlu snapshot monitoru (add_callback DDP subprocess'te çalışmaz)
     start_zip_monitor(run_dir, ckpt_dir, every_n=CHECKPOINT_EVERY_N, interval=90)
 
-    model.train(
-        data    = str(DATA_YAML),
-        project = str(RUNS_DIR),
-        device  = device,
+    trainer = _build_trainer({
+        "model":   str(MODEL_YAML),
+        "data":    str(DATA_YAML),
+        "project": str(RUNS_DIR),
+        "device":  device,
         **PHASE1,
-    )
+    })
+    trainer.train()
 
-    # Faz 1 bitis ZIP'i
-    run_dir = RUNS_DIR / PHASE1["name"]
-    make_final_zip(run_dir, CHECKPOINT_DIR / "phase1", label="phase1_final")
+    make_final_zip(run_dir, ckpt_dir, label="phase1_final")
 
     best = run_dir / "weights" / "best.pt"
     print(f"  En iyi model: {best}")
@@ -522,39 +531,33 @@ def train_phase1(n_gpu: int) -> str:
 
 def train_phase2(phase1_weights: str, n_gpu: int) -> str:
     """Faz 2: best.pt'den dusuk LR ile uzun fine-tune."""
-    from ultralytics import YOLO
-    from checkpoint_zipper import make_checkpoint_callback, make_final_zip
+    from checkpoint_zipper import make_final_zip
 
     print("\n" + "="*55)
-    print("  FAZ 2 — Fine-tune (Dusuk LR)")
+    print("  FAZ 2 — Fine-tune (SkyWatchTrainer, Dusuk LR)")
     print(f"  Baslangic:  {phase1_weights}")
     print(f"  Epoch: {PHASE2['epochs']} | LR0: {PHASE2['lr0']} | Batch: {PHASE2['batch']}")
     print(f"  Patience: {PHASE2['patience']}")
-    print(f"  ZIP her {CHECKPOINT_EVERY_N} epoch'ta: {CHECKPOINT_DIR / 'phase2'}")
+    print(f"  Snapshot her {CHECKPOINT_EVERY_N} epoch'ta: {CHECKPOINT_DIR / 'phase2'}")
     print("="*55)
 
-    # Faz 1'in best.pt'sini yukle
-    model = YOLO(phase1_weights)
-
-    # Her 10 epoch'ta ZIP callback'i ekle
+    device   = "0,1" if n_gpu >= 2 else "0"
+    run_dir  = RUNS_DIR / PHASE2["name"]
     ckpt_dir = CHECKPOINT_DIR / "phase2"
-    model.add_callback(
-        "on_fit_epoch_end",
-        make_checkpoint_callback(ckpt_dir, every_n=CHECKPOINT_EVERY_N)
-    )
 
-    device = "0,1" if n_gpu >= 2 else "0"
+    # Faz 1 ile aynı DDP-uyumlu mekanizma (add_callback DDP'de çalışmaz)
+    start_zip_monitor(run_dir, ckpt_dir, every_n=CHECKPOINT_EVERY_N, interval=90)
 
-    model.train(
-        data    = str(DATA_YAML),
-        project = str(RUNS_DIR),
-        device  = device,
+    trainer = _build_trainer({
+        "model":   phase1_weights,   # Faz 1 best.pt → fine-tune başlangıcı
+        "data":    str(DATA_YAML),
+        "project": str(RUNS_DIR),
+        "device":  device,
         **PHASE2,
-    )
+    })
+    trainer.train()
 
-    # Faz 2 bitis ZIP'i
-    run_dir = RUNS_DIR / PHASE2["name"]
-    make_final_zip(run_dir, CHECKPOINT_DIR / "phase2", label="phase2_final")
+    make_final_zip(run_dir, ckpt_dir, label="phase2_final")
 
     best = run_dir / "weights" / "best.pt"
     print(f"  Final model: {best}")
@@ -565,25 +568,19 @@ def train_phase2(phase1_weights: str, n_gpu: int) -> str:
 # VALİDASYON
 # ══════════════════════════════════════════════════════════
 
-def validate(weights: str, label: str = ""):
-    """Model performansını ölç."""
+def validate(weights: str, label: str = "") -> object:
+    """Detection modelinin performansını ölç ve raporla."""
     from ultralytics import YOLO
 
     print(f"\n  Validasyon: {label} [{Path(weights).parent.parent.name}]")
-    model = YOLO(weights)
+    model   = YOLO(weights)
     metrics = model.val(data=str(DATA_YAML), imgsz=640, verbose=False)
 
-    try:
-        print(f"  mAP@50:     {metrics.pose.map50:.4f}")
-        print(f"  mAP@50:95:  {metrics.pose.map:.4f}")
-        print(f"  Precision:  {metrics.pose.mp:.4f}")
-        print(f"  Recall:     {metrics.pose.mr:.4f}")
-    except:
-        try:
-            print(f"  mAP@50:     {metrics.box.map50:.4f}")
-            print(f"  mAP@50:95:  {metrics.box.map:.4f}")
-        except:
-            print("  Metrikler alınamadı")
+    box = metrics.box
+    print(f"  mAP@50:     {box.map50:.4f}")
+    print(f"  mAP@50:95:  {box.map:.4f}")
+    print(f"  Precision:  {box.mp:.4f}")
+    print(f"  Recall:     {box.mr:.4f}")
 
     return metrics
 

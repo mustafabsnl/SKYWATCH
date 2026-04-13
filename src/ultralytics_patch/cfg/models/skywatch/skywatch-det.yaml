@@ -9,8 +9,9 @@
 #      → Critical: dataset contains faces as small as 10x10px
 #   2. C2f_CAM at P2 level — contextual attention for crowded scenes
 #      → Helps detect faces in dense groups (Hard difficulty)
-#   3. FRM block placement — feature refinement for blur/noise
-#      → Improves detection on low-quality surveillance frames
+#   3. FRM after backbone — feature refinement before neck (layer 11)
+#      → Recovers edge/texture detail lost in blurry surveillance frames
+#      → Placed at P5 (highest semantic level) before top-down path
 #   4. nc: 1 — single class: face (YOLO class_id = 0)
 #
 # Training notes:
@@ -48,42 +49,43 @@ backbone:
   - [-1, 2, C3k2,  [1024, True]]         # 8
   - [-1, 1, SPPF,  [1024, 5]]            # 9  — SPPF
   - [-1, 2, C2PSA, [1024]]               # 10 — P5 with attention (backbone output)
+  - [-1, 1, FRM,   [1024]]               # 11 — Feature Refinement ★ recovers blur-lost edges/textures
 
 # ──────────────────────────────────────────────
 # Head — Top-down (P5→P4→P3→P2) + Bottom-up (P2→P3→P4→P5)
 # ──────────────────────────────────────────────
 head:
   # ── Top-down path ──────────────────────────
-  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]  # 11 — Upsample P5
-  - [[-1, 6], 1, Concat,  [1]]                  # 12 — cat backbone P4 (layer 6)
-  - [-1, 2, C3k2,  [512, False]]                # 13 — P4 neck
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]  # 12 — Upsample FRM(P5)
+  - [[-1, 6], 1, Concat,  [1]]                  # 13 — cat backbone P4 (layer 6)
+  - [-1, 2, C3k2,  [512, False]]                # 14 — P4 neck
 
-  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]  # 14 — Upsample P4
-  - [[-1, 4], 1, Concat,  [1]]                  # 15 — cat backbone P3 (layer 4)
-  - [-1, 2, C3k2,  [256, False]]                # 16 — P3 neck
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]  # 15 — Upsample P4
+  - [[-1, 4], 1, Concat,  [1]]                  # 16 — cat backbone P3 (layer 4)
+  - [-1, 2, C3k2,  [256, False]]                # 17 — P3 neck
 
-  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]  # 17 — Upsample P3 → P2 scale
-  - [[-1, 2], 1, Concat,  [1]]                  # 18 — cat backbone P2 (layer 2)
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]  # 18 — Upsample P3 → P2 scale
+  - [[-1, 2], 1, Concat,  [1]]                  # 19 — cat backbone P2 (layer 2)
   # C2f_CAM: P2 level with contextual attention — critical for small faces
-  - [-1, 2, C2f_CAM, [128, False]]              # 19 — P2 with contextual attention ★
+  - [-1, 2, C2f_CAM, [128, False]]              # 20 — P2 with contextual attention ★
 
   # ── Bottom-up path ─────────────────────────
-  - [-1, 1, Conv,  [128, 3, 2]]                 # 20 — Downsample P2 → P3
-  - [[-1, 16], 1, Concat, [1]]                  # 21 — cat head P3 (layer 16)
-  - [-1, 2, C3k2,  [256, False]]                # 22 — P3 output
+  - [-1, 1, Conv,  [128, 3, 2]]                 # 21 — Downsample P2 → P3
+  - [[-1, 17], 1, Concat, [1]]                  # 22 — cat head P3 (layer 17)
+  - [-1, 2, C3k2,  [256, False]]                # 23 — P3 output
 
-  - [-1, 1, Conv,  [256, 3, 2]]                 # 23 — Downsample P3 → P4
-  - [[-1, 13], 1, Concat, [1]]                  # 24 — cat head P4 (layer 13)
-  - [-1, 2, C3k2,  [512, False]]                # 25 — P4 output
+  - [-1, 1, Conv,  [256, 3, 2]]                 # 24 — Downsample P3 → P4
+  - [[-1, 14], 1, Concat, [1]]                  # 25 — cat head P4 (layer 14)
+  - [-1, 2, C3k2,  [512, False]]                # 26 — P4 output
 
-  - [-1, 1, Conv,  [512, 3, 2]]                 # 26 — Downsample P4 → P5
-  - [[-1, 10], 1, Concat, [1]]                  # 27 — cat P5 (layer 10)
-  - [-1, 2, C3k2,  [1024, True]]                # 28 — P5 output
+  - [-1, 1, Conv,  [512, 3, 2]]                 # 27 — Downsample P4 → P5
+  - [[-1, 11], 1, Concat, [1]]                  # 28 — cat FRM(P5) (layer 11)
+  - [-1, 2, C3k2,  [1024, True]]                # 29 — P5 output
 
   # ── Detection Head ─────────────────────────
   # 4-scale detection: bbox only (no landmarks — WIDER FACE YOLO format)
-  # P2 (19): tiny faces  ≤ 20px  ← most critical for Hard difficulty
-  # P3 (22): small       20~60px
-  # P4 (25): medium      60~180px
-  # P5 (28): large       180px+
-  - [[19, 22, 25, 28], 1, Detect, [nc]]           # 29 — Detect(P2, P3, P4, P5)
+  # P2 (20): tiny faces  ≤ 20px  ← most critical for Hard difficulty
+  # P3 (23): small       20~60px
+  # P4 (26): medium      60~180px
+  # P5 (29): large       180px+
+  - [[20, 23, 26, 29], 1, Detect, [nc]]          # 30 — Detect(P2, P3, P4, P5)
