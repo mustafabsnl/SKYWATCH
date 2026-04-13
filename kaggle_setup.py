@@ -61,17 +61,14 @@ def patch_init(ult_dir: Path):
 
 def patch_tasks(ult_dir: Path):
     """
-    tasks.py'ye C2f_CAM ve FRM'yi parse_model'in C2f handling bloğuna ekle.
-    Regex ile class ismi eşleştirme kullanır (string literali değil).
+    tasks.py'ye C2f_CAM ve FRM'yi parse_model'in C2f handling bloguna ekle.
+    Import ve parse_model set varligi AYRI AYRI kontrol edilir.
     """
     tasks_path = ult_dir / "nn" / "tasks.py"
     content = tasks_path.read_text(encoding="utf-8")
+    modified = False
 
-    if "C2f_CAM" in content:
-        print("  tasks.py zaten patch'li, atlaniyor.")
-        return
-
-    # 1) Import ekle (dosya basina)
+    # 1) Import ekle
     inject_import = "from ultralytics.nn.modules.skywatch_modules import C2f_CAM, FRM"
     if inject_import not in content:
         lines = content.split("\n")
@@ -80,24 +77,58 @@ def patch_tasks(ult_dir: Path):
                 lines.insert(i, inject_import)
                 break
         content = "\n".join(lines)
-
-    # 2) parse_model'in C2f handling setine C2f_CAM ve FRM ekle
-    # Pattern: 'C2f,' veya 'C2f ,' (class reference, string degil)
-    # \bC2f\b -> word boundary ile C2fAttn gibi diğer modülleri etkilemez
-    patched, count = re.subn(
-        r'\bC2f\b(?=\s*,)',   # C2f + virgül (C2fAttn, C2fCIB degil)
-        'C2f, C2f_CAM, FRM',
-        content,
-        count=1,             # sadece ilk oluşumu değiştir
-    )
-    if count:
-        content = patched
-        print("  C2f_CAM/FRM parse_model setine eklendi (class ref)")
+        modified = True
+        print("  Import eklendi")
     else:
-        print("  UYARI: C2f regex match bulunamadi, import yeterli olacak")
+        print("  Import zaten mevcut")
 
-    tasks_path.write_text(content, encoding="utf-8")
-    print("  OK: tasks.py patch tamamlandi")
+    # 2) parse_model C2f handling setine ekle
+    # KRITIK: Import varligi yeterli degil, SET'te de olmali!
+    # "C2f, C2f_CAM" veya "C2f_CAM, FRM" set icinde mi kontrol et
+    in_parse_set = ("C2f, C2f_CAM" in content) or ("C2f_CAM, FRM," in content)
+
+    if not in_parse_set:
+        # Birden fazla pattern dene (ultralytics surumune gore degisir)
+        patterns = [
+            (r'\bC2f\b(?=\s*,)', 'C2f, C2f_CAM, FRM'),   # C2f,
+            (r'\bC2f,',          'C2f, C2f_CAM, FRM,'),   # alternatif
+        ]
+        matched = False
+        for pat, repl in patterns:
+            patched, count = re.subn(pat, repl, content, count=1)
+            if count:
+                content = patched
+                modified = True
+                matched = True
+                print(f"  C2f_CAM parse_model setine eklendi [pattern: {pat[:20]}]")
+                break
+        if not matched:
+            # Son care: parse_model fonksiyonunun basina force-register ekle
+            force_inject = (
+                "\n# SKYWATCH-Det: C2f_CAM/FRM kanal-farkindalik kaydı\n"
+                "try:\n"
+                "    from ultralytics.nn.modules.skywatch_modules import C2f_CAM as _CAM, FRM as _FRM\n"
+                "    _SKYWATCH_EXTRA = {_CAM, _FRM}\n"
+                "except Exception: _SKYWATCH_EXTRA = set()\n"
+            )
+            # parse_model fonksiyonunu bul ve basina ekle
+            patched, count = re.subn(
+                r'(def parse_model\s*\()',
+                force_inject + r'\1',
+                content, count=1
+            )
+            if count:
+                content = patched
+                modified = True
+                print("  C2f_CAM force-inject yapildi (parse_model basina)")
+            else:
+                print("  UYARI: Hic bir pattern eslesmedi! Manuel kontrol gerekli.")
+    else:
+        print("  parse_model zaten patch'li (C2f_CAM set'te mevcut)")
+
+    if modified:
+        tasks_path.write_text(content, encoding="utf-8")
+        print("  OK: tasks.py guncellendi")
 
 
 def copy_yaml(ult_dir: Path):
