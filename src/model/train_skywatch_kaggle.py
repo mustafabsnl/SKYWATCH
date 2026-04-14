@@ -19,22 +19,36 @@ import shutil
 from pathlib import Path
 import argparse
 
-# ══════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════
 # KAGGLE YOLLARI
-# Dataset: lylmsc/wider-face-for-yolo-training
-#   - 32,203 görüntü (train+val zaten ayrılmış)
-#   - ~393,703 etiketli yüz | yüz boyutu: 10px ~ 500px
-#   - Format: YOLO detection (class cx cy w h) — dönüşüm GEREKSİZ
-#   - Erişim: kagglehub.dataset_download() ile otomatik indirilir
-# ══════════════════════════════════════════════════════════
+# Dataset: fareselmenshawii/face-detection-dataset
+#
+#   YAPI (kagglehub ile indirildikten sonra):
+#     <path>/
+#       images/
+#         train/   (13,386 görüntü)
+#         val/     ( 3,347 görüntü)
+#       labels/              ← YOLO normalize format (cx cy w h) ✔
+#         train/   (13,386 .txt)
+#         val/     ( 3,347 .txt)
+#       labels2/             ← WIDER ham format — KULLANILMIYOR
+#
+#   Format: YOLO detection (class cx cy w h) — dönüşüm GEREKSİZ
+#   nc: 1 | class_id: 0 | sinif: face
+#
+#   Yüz büyüklük dağılımı (analiz sonucundan):
+#     tiny  (<5%) : %44.9  → P2 head KRİTİK
+#     small (5-15%): %40.2  → SkyWatchBboxLoss small_w=2.0 DOGRULANMIS
+#     TOPLAM %85.1 küçük yüz → mosaic=1.0 ŞART
+# ════════════════════════════════════════════════════════
 
 WORKING        = Path("/kaggle/working")
 REPO_DIR       = WORKING / "SKYWATCH"
 # DATA_RAW: setup() → download_dataset() tarafından kagglehub ile belirlenir
 DATA_RAW       = None
-# Kaggle dataset slug: iamtushara/face-detection-dataset
-# Yapi: dataset/images/train+val + labels/train+val + data.yaml
-DATASET_SLUG   = "iamtushara/face-detection-dataset"
+# Kaggle dataset slug: fareselmenshawii/face-detection-dataset
+# Yapı: images/train+val, labels/train+val (YOLO format)
+DATASET_SLUG   = "fareselmenshawii/face-detection-dataset"
 RUNS_DIR       = WORKING / "runs"
 CHECKPOINT_DIR = WORKING / "checkpoints"
 GITHUB_REPO    = "https://github.com/mustafabsnl/SKYWATCH.git"
@@ -212,14 +226,6 @@ def download_dataset() -> Path:
 def prepare_data():
     """kagglehub ile dataset'i indir, DATA_YAML global'ini ayarla.
 
-    iamtushara/face-detection-dataset YAPISI:
-      dataset/
-        images/train/  (eğitim görselleri)
-        images/val/    (doğrulama görselleri)
-        labels/train/
-        labels/val/
-        data.yaml      (nc:1, names:['face'])
-
     Train/Val zaten ayrılmış — split gerekmez.
     """
     global DATA_YAML
@@ -246,15 +252,19 @@ def prepare_data():
 
 
 def _find_or_create_data_yaml() -> Path:
-    """Dataset'e ait data.yaml'i her zaman tazeden olustur.
+    """Dataset'e ait data.yaml'i her zaman tazenden olustur.
 
     KRITIK: Eski session'dan kalan /kaggle/working/skywatch_data/data.yaml
-    farkli bir dataset'e (eski WIDER FACE) ait olabilir. Bunu kullanma.
+    farkli bir dataset'e ait olabilir. Bunu kullanma.
     Her zaman DATA_RAW'i baz alarak taze olustur.
 
-    iamtushara/face-detection-dataset yapisi:
-      merged/images/train/      [26,266 goruntu]
-      merged/images/validation/ [6,573 goruntu]
+    fareselmenshawii/face-detection-dataset yapisi:
+      <path>/
+        images/train/  [13,386 goruntu]
+        images/val/    [ 3,347 goruntu]
+        labels/train/  [YOLO normalize: cls cx cy w h]
+        labels/val/    [YOLO normalize: cls cx cy w h]
+        labels2/       [WIDER ham format - KULLANILMIYOR]
     """
     img_root = _find_images_train_root()
 
@@ -328,16 +338,23 @@ def _fix_data_yaml_paths(yaml_path: Path) -> Path:
 def _find_images_train_root() -> Path:
     """images/train klasorunu iceren root dizini dondur (recursive).
 
-    iamtushara dataset: DATA_RAW/merged/images/train/
+    fareselmenshawii/face-detection-dataset yapisi:
+      <DATA_RAW>/images/train/      ← dogrudan root'ta
+      <DATA_RAW>/images/val/
+      <DATA_RAW>/labels/train/      ← YOLO normalize format
+      <DATA_RAW>/labels/val/
+
+    Fallback olarak alt dizinleri de tarar.
     """
     known = [
-        DATA_RAW / "merged",       # iamtushara: merged/images/train/
-        DATA_RAW / "dataset",
-        DATA_RAW,
+        DATA_RAW,                              # dogrudan root (fareselmenshawii)
+        DATA_RAW / "dataset",                  # alternatif alt klasor
+        DATA_RAW / "merged",                   # eski iamtushara yapisi
         WORKING / "skywatch_data",
     ]
     for root in known:
         if root and (root / "images" / "train").exists():
+            print(f"  images/train bulundu: {root}")
             return root
 
     for dirpath, dirnames, _ in os.walk(str(DATA_RAW)):

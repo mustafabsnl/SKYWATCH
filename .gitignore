@@ -17,6 +17,14 @@ datasets/
 *.tar
 *.7z
 
+# ── Yerel Archive Dataset (fareselmenshawii/face-detection-dataset)
+# Kaggle'da kagglehub ile indirilir — GitHub'a GITMEZ
+archive/
+
+# analyze_dataset.py'nin ürettiği data.yaml (lokal path içerir)
+# Kaggle'da train_skywatch_kaggle.py tarafından dinamik oluşturulur
+archive/data.yaml
+
 # ── Model Ağırlıkları ────────────────────────────────
 /models/                   # Sadece kök /models/ klasörü (trained weights)
 # NOT: src/ultralytics_patch/cfg/models/ → KOD, gitignore'dan muaf
