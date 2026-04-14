@@ -103,33 +103,61 @@ class SkyWatchBboxLoss(BboxLoss):
         imgsz: torch.Tensor,
         stride: torch.Tensor,
     ) -> tuple:
-        """Compute adaptive size-weighted IoU and DFL losses.
-
-        Identical to BboxLoss.forward except the per-anchor 'weight' tensor
-        is multiplied by a size-dependent factor before computing losses.
-        """
+        """Compute advanced hybrid loss (GAOC, DR Loss, GFL V2, Adaptive Size)."""
         weight = target_scores.sum(-1)[fg_mask].unsqueeze(-1)  # (N_pos, 1)
+        size_w = torch.ones_like(weight)
 
-        # ── SKYWATCH Katkisi: Adaptif Buyukluk Agirligi ──────────────
+        # ── SKYWATCH ÖZELLİĞİ: Adaptif Büyüklük Ağırlığı ──────────────
         if fg_mask.sum() > 0:
             try:
-                size_w = self._compute_size_weight(target_bboxes, fg_mask, stride, imgsz)
-                weight = weight * size_w.unsqueeze(-1)
+                size_w_flat = self._compute_size_weight(target_bboxes, fg_mask, stride, imgsz)
+                size_w = size_w_flat.unsqueeze(-1)
+                weight = weight * size_w
             except Exception:
-                pass  # Boyut uyumsuzlugunda standart weight kullan
+                pass  # Boyut uyumsuzluğunda standart weight kullan
         # ─────────────────────────────────────────────────────────────
 
         iou = bbox_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask], xywh=False, CIoU=True)
-        loss_iou = ((1.0 - iou) * weight).sum() / target_scores_sum
 
-        # DFL loss (parent ile ayni)
+        # ── SKYWATCH ÖZELLİĞİ: DR Loss (Distributional Ranking) ─────
+        # Pozitif örnekleri kendi içlerinde sırala. Düşük kaliteli/belirsiz
+        # kutuları (Uncertainty Filtering) filtrele ve şahin gözlü adaylara ağırlık ver.
+        iou_scores = iou.detach().clamp(min=0).unsqueeze(-1)  # (N_pos, 1)
+        if iou_scores.numel() > 1:
+            iou_min, iou_max = iou_scores.min(), iou_scores.max()
+            iou_rank = (iou_scores - iou_min) / (iou_max - iou_min + 1e-6)
+            # Kaliteli kutulara 1.2x'e kadar bonus, kötü kutulara 0.5x zayıflatma
+            dr_weight = 0.5 + 0.7 * iou_rank  
+            weight = weight * dr_weight
+
+        # ── SKYWATCH ÖZELLİĞİ: GAOC (Gaussian/Ochiai Mantığı) ────────
+        # Đặc biệt küçük yüzlerde (size_w > 1) kaymayı (jitter) tolere edip
+        # sınırların keskinleşmesini sağlayan asimetrik geometrik hata cezası.
+        gaoc_error = (1.0 - iou).unsqueeze(-1)  # (N_pos, 1)
+        gaoc_penalty = torch.where(size_w > 1.0, gaoc_error ** 1.3, gaoc_error)
+        
+        loss_iou = (gaoc_penalty * weight).sum() / target_scores_sum
+
+        # DFL (Yeniden yapılandırılmış GFL V2)
         if self.dfl_loss:
+            # ── SKYWATCH ÖZELLİĞİ: GFL V2 (Dist. Sharpness / DGQP) ───
+            # DFL olasılık dağılımının (distribution) "Sivrilik (Sharpness)" analizi.
+            # Eğri yayvansa model kararsız, sivrilerse model hedefte emin.
+            p_dist = F.softmax(pred_dist[fg_mask].view(-1, 4, self.dfl_loss.reg_max), dim=-1)
+            sharpness = p_dist.max(dim=-1)[0].mean(dim=-1, keepdim=True)  # (N_pos, 1)
+            
+            # Kalite odaklı Scale. Dağılım ne kadar belirsizse (sharpness düşük), 
+            # DFL hatasını o kadar yükseltip modeli o kutuyu iyileştirmeye ZORLA.
+            gfl_weight = 2.0 - sharpness.detach() 
+
             target_ltrb = bbox2dist(anchor_points, target_bboxes, self.dfl_loss.reg_max - 1)
             loss_dfl = (
-                self.dfl_loss(pred_dist[fg_mask].view(-1, self.dfl_loss.reg_max), target_ltrb[fg_mask]) * weight
+                self.dfl_loss(pred_dist[fg_mask].view(-1, self.dfl_loss.reg_max), target_ltrb[fg_mask]) 
+                * weight * gfl_weight
             )
             loss_dfl = loss_dfl.sum() / target_scores_sum
         else:
+            # DFL kapalıysa (örneğin sadece l1 hesaplar)
             target_ltrb = bbox2dist(anchor_points, target_bboxes)
             target_ltrb = target_ltrb * stride
             target_ltrb[..., 0::2] /= imgsz[1]
