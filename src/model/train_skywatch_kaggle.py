@@ -89,15 +89,15 @@ PHASE1 = dict(
     hsv_h           = 0.015,
     hsv_s           = 0.7,
     hsv_v           = 0.4,
-    erasing         = 0.4,
+    erasing         = 0.1,
     # Dataset 10px~500px yüz içeriyor → multi_scale önemli
     # OOM riski: True yapmak istersen batch=8'e düşür
     multi_scale     = False,
     close_mosaic    = 10,
     # Loss — Detection modu (pose/kobj yok)
-    box             = 7.5,
+    box             = 8.5,
     cls             = 0.5,
-    dfl             = 1.5,
+    dfl             = 2.0,
     # Kaydetme
     name            = "skywatch_det_phase1",
     exist_ok        = True,
@@ -133,13 +133,13 @@ PHASE2 = dict(
     hsv_h           = 0.01,
     hsv_s           = 0.4,
     hsv_v           = 0.3,
-    erasing         = 0.2,
+    erasing         = 0.0,
     multi_scale     = False,
     close_mosaic    = 50,
     # Loss — Detection modu (pose/kobj yok)
-    box             = 7.5,
+    box             = 8.5,
     cls             = 0.5,
-    dfl             = 1.5,
+    dfl             = 2.0,
     # Kaydetme
     name            = "skywatch_det_phase2",
     exist_ok        = True,

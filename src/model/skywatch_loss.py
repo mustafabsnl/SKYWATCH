@@ -126,15 +126,17 @@ class SkyWatchBboxLoss(BboxLoss):
         if iou_scores.numel() > 1:
             iou_min, iou_max = iou_scores.min(), iou_scores.max()
             iou_rank = (iou_scores - iou_min) / (iou_max - iou_min + 1e-6)
-            # Kaliteli kutulara 1.2x'e kadar bonus, kötü kutulara 0.5x zayıflatma
-            dr_weight = 0.5 + 0.7 * iou_rank  
+            # Tavan baskısı kaldırıldı: Kaliteli kutulara 1.5x'e kadar bonus, kötü kutulara 0.5x zayıflatma
+            dr_weight = 0.5 + 1.0 * iou_rank  
             weight = weight * dr_weight
 
-        # ── SKYWATCH ÖZELLİĞİ: GAOC (Gaussian/Ochiai Mantığı) ────────
-        # Đặc biệt küçük yüzlerde (size_w > 1) kaymayı (jitter) tolere edip
-        # sınırların keskinleşmesini sağlayan asimetrik geometrik hata cezası.
-        gaoc_error = (1.0 - iou).unsqueeze(-1)  # (N_pos, 1)
-        gaoc_penalty = torch.where(size_w > 1.0, gaoc_error ** 1.3, gaoc_error)
+        # ── SKYWATCH ÖZELLİĞİ: GAOC (Alpha-IoU / Gaussian Mantığı) ────────
+        # Đặc biệt küçük yüzlerde (size_w > 1) model hedefe yaklaştıkça gradyanın
+        # ölmemesi (Vanishing Gradient) ve tam sıfıra sıfır oturması (mAP50-95 iyileştirmesi)
+        # için hata eksponansiyel büyütülür (üs < 1.0)
+        gaoc_error = (1.0 - iou).clamp(min=1e-6).unsqueeze(-1)  # (N_pos, 1)
+        # Hata küçükken (örneğin 0.04), karekökü (0.2) hatadan daha büyüktür. Bu da gradyanı diriltir!
+        gaoc_penalty = torch.where(size_w > 1.0, gaoc_error ** 0.5, gaoc_error)
         
         loss_iou = (gaoc_penalty * weight).sum() / target_scores_sum
 
@@ -146,9 +148,9 @@ class SkyWatchBboxLoss(BboxLoss):
             p_dist = F.softmax(pred_dist[fg_mask].view(-1, 4, self.dfl_loss.reg_max), dim=-1)
             sharpness = p_dist.max(dim=-1)[0].mean(dim=-1, keepdim=True)  # (N_pos, 1)
             
-            # Kalite odaklı Scale. Dağılım ne kadar belirsizse (sharpness düşük), 
-            # DFL hatasını o kadar yükseltip modeli o kutuyu iyileştirmeye ZORLA.
-            gfl_weight = 2.0 - sharpness.detach() 
+            # Kalite odaklı Agresif Scale: Sharpness 1.0 ise weight=1.0 / Sharpness 0.2 ise weight=2.6
+            # DFL hatasını agresif yükseltip modeli o kutuyu iyileştirmeye ZORLA.
+            gfl_weight = 3.0 - (2.0 * sharpness.detach()) 
 
             target_ltrb = bbox2dist(anchor_points, target_bboxes, self.dfl_loss.reg_max - 1)
             loss_dfl = (

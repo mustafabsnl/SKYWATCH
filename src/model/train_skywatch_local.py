@@ -80,9 +80,9 @@ TRAIN_ARGS = dict(
 
     # ── Loss Ağırlıkları ─────────────────────────────────────────
     # %85 küçük yüz → box losu ağır tut
-    box  = 7.5,
+    box  = 8.5,
     cls  = 0.5,
-    dfl  = 1.5,
+    dfl  = 2.0,
 
     # ── Augmentasyon ─────────────────────────────────────────────
     # Kalabalık sahneler (max=153 yüz) → mosaic ŞART
@@ -97,8 +97,8 @@ TRAIN_ARGS = dict(
     hsv_h        = 0.015,
     hsv_s        = 0.7,
     hsv_v        = 0.4,
-    # erasing: küçük yüzleri kasıtlı sil → okluzyona dayanıklılık
-    erasing      = 0.4,
+    # erasing: küçük yüzlerin bozulmasını engellemek için hafif tut
+    erasing      = 0.1,
     # Küçük yüz dataset → multi_scale faydalı ama OOM riski
     # VRAM izleyip açabilirsin
     multi_scale  = False,
