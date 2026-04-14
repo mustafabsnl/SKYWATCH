@@ -843,3 +843,109 @@ Objective: Implement the 2026 IEEE strategy for robust small face detection in s
 - Merge the YAML definitions of YOLO11 and YOLOv12 into a single 'skywatch-hybrid.yaml'.
 - Implement the 'Area-Attention' module in PyTorch for the neck.
 - Create a 'Surveillance-Testing' script that evaluates the model specifically on 4K footage where faces are extremely small.
+
+
+
+
+
+
+
+
+Makale Özeti: GAOC Mantığı Nedir?
+Geleneksel kayıp fonksiyonları (IoU, DIoU, CIoU) kutunun sadece geometrik benzerliğine bakar. GAOC ise şu iki devrimsel adımı ekler:
+
+Gaussian Dağılımı: Bir kutunun kenarlarının (sol, üst, sağ, alt) tam yerini tahmin etmek zordur. Makale, her kenarın yerini tek bir nokta olarak değil, bir Gaussian olasılık dağılımı olarak görür. Eğer tahmin edilen kutu, gerçek kutunun (ground truth) olasılık yoğunluğunun içindeyse, model daha yüksek ödül alır.
+
+Ochiai Katsayısı: Bu katsayı, tahmin edilen kutu ile gerçek kutu arasındaki "geometrik benzerliği" daha hassas ölçer. Özellikle küçük nesnelerde (senin uzaktaki yüzlerin) kutunun bir piksel kayması bile IoU'yu çok düşürürken, Ochiai bu durumu daha toleranslı ve öğretici şekilde yönetir.
+
+Adaptive (Uyarlanabilir) Yapı: Kayıp fonksiyonu, nesnenin boyutuna göre kendini ayarlar. Bu da senin SKYWATCH-Det projenin en büyük ihtiyacı olan "küçük ve büyük yüzler arasındaki denge" sorununu çözer.
+
+2. Antigravity İçin Teknik Metadata ve Entegrasyon Bilgileri
+Bu bilgileri Antigravity'ye vererek modelinin DFL ve Bbox kayıplarını bu makaleye göre optimize etmesini isteyebilirsin:
+
+Kayıp Fonksiyonu Adı: GAOC (Gaussian Adaptive Ochiai Loss)
+
+DFL ile İlişkisi: DFL, koordinatların bir aralık (bin) içindeki olasılığını hesaplar. GAOC, bu olasılık aralıklarını Gaussian smoothing (yumuşatma) ile rafine ederek, modelin koordinatları "keskin" (sharp) ama "esnek" bir şekilde öğrenmesini sağlar.
+
+Implementasyon Notu: GAOC, standart IoU_Loss yerine geçer veya ona ek bir terim (+ GAOC_Loss) olarak eklenir.
+
+Antigravity İçin Hazır Konfigürasyon Notu:
+
+"SKYWATCH-Det eğitimi sırasında, DFL (Distribution Focal Loss) hesaplamasını GAOC makalesindeki Gaussian dağılım parametreleri ile destekle. Özellikle 400 pikselden küçük kutularda, Ochiai katsayısını kullanarak regresyon kaybını (loss_bbox) %50 daha fazla ağırlıklandır. Bu, küçük yüzlerdeki 'jitter' (titreme) ve kutu kayması sorununu minimize edecektir."
+
+3. Senin Modelini Geliştirme Stratejin (DFL İyileştirme)
+Kendi modelini geliştirmek için şu adımları izleyebilirsin:
+
+Dağılımı Daralt: DFL genellikle geniş bir olasılık dağılımı sunar. GAOC'daki Gaussian mantığını kullanarak, bu dağılımı gerçek kutu kenarına doğru "daraltan" (sharpening) bir ceza terimi ekleyebilirsin.
+
+Scale-Aware DFL: Küçük yüzlerde DFL'in hata payı büyüktür. Makaledeki "Adaptive" (uyarlanabilir) mekanizmayı kullanarak, nesne küçüldükçe DFL hassasiyetini artıran bir katsayı tanımlayabilirsin.
+
+
+
+
+
+
+
+1. Makale Özeti: DR Loss Mantığı Nedir?
+Geleneksel modellerde (YOLO gibi), sınıflandırma kaybı (Focal Loss gibi) her örneğe bağımsız bir puan verir. Ancak bu makale, nesne tespitini bir "Sıralama Problemi" olarak görür:
+
+Dağılımsal Sıralama: Modelin önündeki binlerce aday kutu (anchor/proposals) içinden, gerçek nesneye en yakın olanın (Positive), arka plan olanlardan (Negative) çok daha yüksek bir puan almasını sağlar.
+
+Hiyerarşik Yapı: Makale, pozitif örneklerin kendi aralarında da (IoU değerine göre) sıralanması gerektiğini savunur. Yani %90 IoU'ya sahip bir kutunun kaybı, %60 IoU'ya sahip olandan farklı olmalıdır.
+
+DFL ile Bağlantısı: DFL, koordinatları bir olasılık dağılımı olarak tahmin eder. DR Loss, bu dağılımın içindeki "doğru" koordinat bin'inin (hücrenin), diğer yanlış bin'lere göre baskın bir şekilde sıralanmasını sağlar.
+
+2. Antigravity İçin Teknik Metadata ve Stratejik Notlar
+Antigravity'ye bu bilgileri vererek, modelin özellikle kalabalık sahnelerdeki "kararsızlığını" gidermesini sağlayabilirsin:
+
+Kayıp Fonksiyonu Adı: DR Loss (Distributional Ranking Loss)
+
+Projedeki Rolü: Yanlış pozitifleri (False Positives) azaltmak ve kutu kalitesini artırmak.
+
+Teknik Avantaj: Standart Focal Loss, örnekler arasındaki ilişkiyi görmez. DR Loss ise "Bu kutu, şu kutudan daha iyi bir yüz adayıdır" diyerek modelin daha seçici olmasını sağlar.
+
+Antigravity İçin Hazır Konfigürasyon Notu:
+
+"SKYWATCH-Det eğitiminde, sınıflandırma ve regresyon arasındaki dengesizliği gidermek için DR Loss (Distributional Ranking Loss) prensiplerini uygula. Pozitif örnekleri (gerçek yüzler) kendi içinde IoU değerlerine göre sırala ve düşük kaliteli (belirsiz) kutuların gradyan ağırlığını azaltarak modelin net/keskin kutulara odaklanmasını sağla."
+
+3. Senin Modelini Geliştirme Stratejin (DFL İyileştirme)
+Kendi modelini geliştirirken DR Loss'tan şu iki dersi çıkarabiliriz:
+
+Coordinate Ranking: DFL katmanında, koordinat olasılıklarını sadece tahmin etme, onları birbiriyle yarıştır. Doğru koordinatın olasılığı, komşu koordinatların toplamından belirli bir marj (margin) kadar yüksek olmalı.
+
+Uncertainty Filtering: Eğer DFL dağılımı çok yassıysa (yani model koordinattan emin değilse), DR Loss mantığıyla bu kutunun güven puanını (confidence) otomatik olarak düşür.
+
+
+
+
+
+Makale Özeti: GFL V2’nin Devrimi Nedir?
+GFL V1 (ilk versiyon), kutu koordinatlarını tek bir nokta yerine bir olasılık dağılımı olarak tahmin ediyordu. GFL V2 ise şu soruyu sorar: "Bu dağılımın şekli bize ne anlatıyor?"
+
+Dağılımın Şekli = Güven: Eğer koordinat dağılımı tek bir noktada çok sivri (sharp) bir tepe yapıyorsa, model o kenarın yerinden çok emindir. Eğer dağılım yassı (flat) ise, model kararsızdır (bulanık veya küçük nesne).
+
+DGQP (Distribution-Guided Quality Predictor): Makale, DFL'den gelen bu "dağılım şeklini" kullanarak, kutunun Localization Quality (Konumlandırma Kalitesi) değerini tahmin eden çok hafif bir modül ekler.
+
+Sonuç: Model sadece "burada bir yüz var" demez, "buradaki yüzün kutu sınırlarından %95 eminim" der. Bu da mAP skorunu, özellikle yüksek hassasiyet gerektiren (IoU 0.75+) testlerde uçurur.
+
+2. Antigravity İçin Teknik Metadata ve Direktifler
+Antigravity'ye bu makale üzerinden şu spesifik ayarları yaptırmalısın:
+
+Kayıp Fonksiyonu: Generalized Focal Loss V2.
+
+DFL Geliştirmesi: "Top-k" istatistiksel özelliklerini DFL dağılımından çıkarıp sınıflandırma puanı (classification score) ile çarpılacak bir kalite faktörüne dönüştür.
+
+Projedeki Rolü: Küçük ve kalabalık yüzlerde (surveillance), kutuların titremesini (jitter) engellemek ve en doğru kutuyu seçmek.
+
+Antigravity İçin Hazır Konfigürasyon Notu:
+
+"SKYWATCH-Det eğitiminde, standart DFL yerine GFL V2 mimarisini aktive et. DFL dağılımının 'istatistiksel yoğunluğunu' (top-k values) girdi olarak alan DGQP modülünü kullan. Bu sayede, küçük yüzlerdeki koordinat belirsizliğini bir kalite puanı olarak sınıflandırmaya yansıt ve düşük kaliteli kutuların NMS aşamasında elenmesini sağla."
+
+3. Kendi DFL Modelini Geliştirme Stratejin (Final Sentezi)
+Şu ana kadar incelediğin 3 makaleyi (GAOC, DR Loss, GFL V2) birleştirerek "Skywatch-Loss" adında hibrit bir yapı kurabilirsin:
+
+GFL V2'den: Dağılımın "şeklini" (istatistiklerini) alıp bir kalite puanı üret.
+
+GAOC'dan: Bu dağılımı bir Gaussian ile yumuşat/rafine et (özellikle küçük yüzler için).
+
+DR Loss'tan: Bu kalite puanlarını kullanarak kutuları birbirine göre sırala (Ranking).
