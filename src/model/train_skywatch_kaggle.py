@@ -135,7 +135,7 @@ PHASE2 = dict(
     hsv_v           = 0.3,
     erasing         = 0.2,
     multi_scale     = False,
-    close_mosaic    = 30,
+    close_mosaic    = 50,
     # Loss — Detection modu (pose/kobj yok)
     box             = 7.5,
     cls             = 0.5,
@@ -167,9 +167,14 @@ def setup():
     else:
         print(f"  Repo mevcut: {REPO_DIR}")
 
-    # Path'e ekle
+    # Path'e ekle (Mevcut islem icin)
     sys.path.insert(0, str(REPO_DIR))
     sys.path.insert(0, str(REPO_DIR / "src" / "model"))
+
+    # DDP (Distributed Data Parallel) Alt islemleri (subprocess) icin PYTHONPATH guncellemesi (Kritik Duzeltme)
+    # Ultralytics DDP baslatirken yeni bir terminal acar, sys.path'i gormez.
+    os.environ["PYTHONPATH"] = f"{str(REPO_DIR)}:{str(REPO_DIR / 'src' / 'model')}:" + os.environ.get("PYTHONPATH", "")
+
 
     # kaggle_setup.py calistir (C2f_CAM, FRM patch + YAML)
     setup_script = REPO_DIR / "kaggle_setup.py"
