@@ -249,8 +249,56 @@ class FRM(nn.Module):
         # Kanal sayısı değişirse projeksiyon, değişmezse identity
         self.shortcut = Conv(c1, c2, 1) if c1 != c2 else nn.Identity()
 
+        # Kayit altina al
+        self._c1 = c1
+        self._c2 = c2
+
+    def _ensure_channels(self, x: torch.Tensor) -> None:
+        """Kanal uyumsuzlugunda dinamik olarak modulu yeniden insa et.
+        tasks.py patch atlanirsa, parse_model c1 yerine weights pass'lar (c1=1024 gelir).
+        Bunu gercek gelen kanal sayisina gore onarma isini otomatik yapar.
+        """
+        actual_c1 = x.shape[1]
+        c1 = self._c1
+        c2 = self._c2
+
+        # In channels beklenen ile ayniysa, islem yapma
+        if actual_c1 == self.branch1[0].conv.in_channels:
+            return
+
+        print(f"  [FRM] Auto-rebuild: expected c1={c1}, got actual_c1={actual_c1}")
+        
+        c1 = actual_c1
+        c_ = max(c1 // 2, 32)
+
+        # C2 eger eskiden 1024 olarak geldiyse, FRM default behaviour 512 cikarmalidir
+        # Biz guvenceye alalim (eski c1 ile orantilayalim)
+        c2 = actual_c1 # Pass-through
+
+        self.branch1 = nn.Sequential(
+            Conv(c1, c_, 1),
+            nn.Conv2d(c_, c_, kernel_size=3, padding=2, dilation=2, groups=c_, bias=False),
+            nn.Conv2d(c_, c_, kernel_size=1, bias=False),
+            nn.BatchNorm2d(c_),
+            nn.SiLU(inplace=True),
+        ).to(x.device)
+
+        self.branch2 = nn.Sequential(
+            Conv(c1, c_, 1),
+            nn.Conv2d(c_, c_, kernel_size=3, padding=4, dilation=4, groups=c_, bias=False),
+            nn.Conv2d(c_, c_, kernel_size=1, bias=False),
+            nn.BatchNorm2d(c_),
+            nn.SiLU(inplace=True),
+        ).to(x.device)
+
+        self.fuse = Conv(c_ * 2, c2, 1).to(x.device)
+        self.shortcut = Conv(c1, c2, 1).to(x.device) if c1 != c2 else nn.Identity()
+        self._c1 = c1
+        self._c2 = c2
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """İleri geçiş: çift dilated kol + residual."""
+        self._ensure_channels(x)
         b1 = self.branch1(x)
         b2 = self.branch2(x)
         refined = self.fuse(torch.cat([b1, b2], dim=1))  # (B, c2, H, W)

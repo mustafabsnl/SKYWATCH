@@ -82,49 +82,26 @@ def patch_tasks(ult_dir: Path):
     else:
         print("  Import zaten mevcut")
 
-    # 2) parse_model C2f handling setine ekle
-    # KRITIK: Import varligi yeterli degil, SET'te de olmali!
-    # "C2f, C2f_CAM" veya "C2f_CAM, FRM" set icinde mi kontrol et
-    in_parse_set = ("C2f, C2f_CAM" in content) or ("C2f_CAM, FRM," in content)
-
-    if not in_parse_set:
-        # Birden fazla pattern dene (ultralytics surumune gore degisir)
-        patterns = [
-            (r'\bC2f\b(?=\s*,)', 'C2f, C2f_CAM, FRM'),   # C2f,
-            (r'\bC2f,',          'C2f, C2f_CAM, FRM,'),   # alternatif
-        ]
-        matched = False
-        for pat, repl in patterns:
-            patched, count = re.subn(pat, repl, content, count=1)
-            if count:
-                content = patched
-                modified = True
-                matched = True
-                print(f"  C2f_CAM parse_model setine eklendi [pattern: {pat[:20]}]")
-                break
-        if not matched:
-            # Son care: parse_model fonksiyonunun basina force-register ekle
-            force_inject = (
-                "\n# SKYWATCH-Det: C2f_CAM/FRM kanal-farkindalik kaydı\n"
-                "try:\n"
-                "    from ultralytics.nn.modules.skywatch_modules import C2f_CAM as _CAM, FRM as _FRM\n"
-                "    _SKYWATCH_EXTRA = {_CAM, _FRM}\n"
-                "except Exception: _SKYWATCH_EXTRA = set()\n"
-            )
-            # parse_model fonksiyonunu bul ve basina ekle
-            patched, count = re.subn(
-                r'(def parse_model\s*\()',
-                force_inject + r'\1',
-                content, count=1
-            )
-            if count:
-                content = patched
-                modified = True
-                print("  C2f_CAM force-inject yapildi (parse_model basina)")
-            else:
-                print("  UYARI: Hic bir pattern eslesmedi! Manuel kontrol gerekli.")
+    # 2) parse_model tuple'ini modifiye et
+    # Eger eski patch sadece "C2f_CAM" iceriyorsa, onu "C2f_CAM, FRM" yap.
+    if "C2f_CAM, FRM" in content:
+        print("  parse_model zaten patch'li (C2f_CAM ve FRM mevcut)")
     else:
-        print("  parse_model zaten patch'li (C2f_CAM set'te mevcut)")
+        # Eski bozuk patch varsa ("C2f, C2f_CAM") FRM ekle
+        content, c1 = re.subn(r'C2f_CAM(?!\s*,\s*FRM)', 'C2f_CAM, FRM', content)
+        if c1:
+            modified = True
+            print("  Bozuk parse_model patch'i düzeltildi (FRM eklendi).")
+        else:
+            # Hic patch yoksa standart C2f yanina ekle
+            content, c2 = re.subn(r'\bC2f\b(?=\s*,)', 'C2f, C2f_CAM, FRM', content, count=1)
+            content, c3 = re.subn(r'\bC2f,', 'C2f, C2f_CAM, FRM,', content, count=1)
+            
+            if c2 or c3:
+                modified = True
+                print("  parse_model tuple'ina C2f_CAM ve FRM basariyla eklendi.")
+            else:
+                print("  UYARI: parse_model tuple'i bulunamadi. Manuel kontrol gerekebilir.")
 
     if modified:
         tasks_path.write_text(content, encoding="utf-8")
