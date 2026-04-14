@@ -430,9 +430,10 @@ def start_zip_monitor(run_dir: Path, checkpoint_dir: Path,
                 if src.exists():
                     shutil.copy2(src, snap_dir / fname)
 
-            # ── 3. PNG grafikler ─────────────────────────────────
-            for png in run_dir.glob("*.png"):
-                shutil.copy2(png, snap_dir / png.name)
+            # ── 3. Grafikler ve Görseller (PNG / JPG) ────────────
+            for ext in ["*.png", "*.jpg", "*.jpeg"]:
+                for img_file in run_dir.glob(ext):
+                    shutil.copy2(img_file, snap_dir / img_file.name)
 
             # ── 4. snapshot_summary.json ─────────────────────────
             metrics = {}
