@@ -68,7 +68,7 @@ CHECKPOINT_EVERY_N = 5
 # FAZ 1 HİPERPARAMETRELERİ
 # ══════════════════════════════════════════════════════════
 PHASE1 = dict(
-    epochs          = 120,
+    epochs          = 100,
     imgsz           = 640,
     batch           = 8,           # 2xT4: 4 per GPU — OOM olmasin (nbs=64 ile grad accum)
     lr0             = 0.001,       # Başlangıç LR
