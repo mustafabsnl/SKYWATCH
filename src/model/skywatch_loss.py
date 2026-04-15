@@ -148,9 +148,9 @@ class SkyWatchBboxLoss(BboxLoss):
             p_dist = F.softmax(pred_dist[fg_mask].view(-1, 4, self.dfl_loss.reg_max), dim=-1)
             sharpness = p_dist.max(dim=-1)[0].mean(dim=-1, keepdim=True)  # (N_pos, 1)
             
-            # Kalite odaklı Agresif Scale: Sharpness 1.0 ise weight=1.0 / Sharpness 0.2 ise weight=2.6
-            # DFL hatasını agresif yükseltip modeli o kutuyu iyileştirmeye ZORLA.
-            gfl_weight = 3.0 - (2.0 * sharpness.detach()) 
+            # Kalite odaklı Scale: Sharpness 1.0 ise weight=1.0 / Sharpness 0.2 ise weight=1.8
+            # Daha yumuşak — aşırı agresif DFL loss'u önle
+            gfl_weight = 2.0 - (1.0 * sharpness.detach()) 
 
             target_ltrb = bbox2dist(anchor_points, target_bboxes, self.dfl_loss.reg_max - 1)
             loss_dfl = (

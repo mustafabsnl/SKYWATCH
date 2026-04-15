@@ -16,7 +16,27 @@ from pathlib import Path
 # Proje root'unu ekle
 ROOT = Path(__file__).parents[2]
 sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(ROOT / "ultralytics_skywatch"))
+
+
+def _resolve_yaml_path() -> Path:
+    """skywatch-det.yaml yolunu ortama gore bul.
+
+    Oncelik:
+      1) Kurulu ultralytics paketinin cfg dizini (Kaggle patch akisi)
+      2) Repo icindeki patch yaml'i (lokal calisma)
+    """
+    try:
+        import ultralytics  # type: ignore
+
+        ult_dir = Path(ultralytics.__file__).parent
+        p = ult_dir / "cfg" / "models" / "skywatch" / "skywatch-det.yaml"
+        if p.exists():
+            return p
+    except Exception:
+        pass
+
+    p2 = ROOT / "src" / "ultralytics_patch" / "cfg" / "models" / "skywatch" / "skywatch-det.yaml"
+    return p2
 
 
 def test_module_imports():
@@ -75,7 +95,7 @@ def test_yaml_parse():
     try:
         from ultralytics import YOLO
 
-        yaml_path = ROOT / "ultralytics_skywatch" / "ultralytics" / "cfg" / "models" / "skywatch" / "skywatch-det.yaml"
+        yaml_path = _resolve_yaml_path()
 
         if not yaml_path.exists():
             print(f"  ✗ YAML bulunamadı: {yaml_path}")
@@ -106,7 +126,7 @@ def test_forward_pass():
         import torch
         from ultralytics import YOLO
 
-        yaml_path = ROOT / "ultralytics_skywatch" / "ultralytics" / "cfg" / "models" / "skywatch" / "skywatch-det.yaml"
+        yaml_path = _resolve_yaml_path()
         model = YOLO(str(yaml_path))
         model.model.eval()
 

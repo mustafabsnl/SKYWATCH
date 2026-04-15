@@ -17,12 +17,13 @@ import torch
 from ultralytics import YOLO
 
 # ── Config ────────────────────────────────────────────────────────────
-BASE_DIR  = Path("C:/Users/musta/OneDrive/Desktop/SKYWATCH")
-DATA_YAML = BASE_DIR / "src/model/data.yaml"
-RUNS_DIR  = BASE_DIR / "src/model/runs"
+# Proje kokunu dinamik belirle (Windows/Kaggle/CI uyumlu)
+BASE_DIR = Path(__file__).parents[2]
+DATA_YAML = BASE_DIR / "src" / "model" / "data.yaml"
+RUNS_DIR = BASE_DIR / "src" / "model" / "runs"
 
-# Ultralytics reposu üzerinden custom model yüklemek için
-ULTRA_CFG = BASE_DIR / "ultralytics/ultralytics/cfg/models/v8/skywatch-det.yaml"
+# Custom YAML (repo icindeki patch konumu)
+ULTRA_CFG = BASE_DIR / "src" / "ultralytics_patch" / "cfg" / "models" / "skywatch" / "skywatch-det.yaml"
 
 TRAIN_ARGS = dict(
     data=str(DATA_YAML.resolve()),

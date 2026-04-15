@@ -82,26 +82,51 @@ def patch_tasks(ult_dir: Path):
     else:
         print("  Import zaten mevcut")
 
-    # 2) parse_model tuple'ini modifiye et
-    # Eger eski patch sadece "C2f_CAM" iceriyorsa, onu "C2f_CAM, FRM" yap.
-    if "C2f_CAM, FRM" in content:
-        print("  parse_model zaten patch'li (C2f_CAM ve FRM mevcut)")
-    else:
-        # Eski bozuk patch varsa ("C2f, C2f_CAM") FRM ekle
-        content, c1 = re.subn(r'C2f_CAM(?!\s*,\s*FRM)', 'C2f_CAM, FRM', content)
-        if c1:
+    # 2) KRITIK: Ultralytics surumlerine gore parse_model modulleri
+    # base_modules/repeat_modules set'lerinde tutulabilir. Sadece "C2f," aramak yetmez.
+    # Hedef: C2f_CAM base+repeat set'e girsin, FRM ise parse_model'de ozel-case ile (c1,c2) alsin.
+
+    # 2.a) base_modules set'ine C2f_CAM ekle (yoksa)
+    # Not: Import satirinda C2f_CAM gececegi icin tum dosyada aramak yanlis olur.
+    base_has = re.search(r"base_modules\s*=\s*frozenset\([\s\S]{0,2000}?C2f_CAM", content) is not None
+    if "base_modules" in content and not base_has:
+        # En guvenlisi: base_modules tanimi icinde "C2f," sonrasina ekleme denemesi
+        content, n_base = re.subn(r"(\bC2f\b\s*,)", r"\1\n            C2f_CAM,  # SKYWATCH", content, count=1)
+        if n_base:
             modified = True
-            print("  Bozuk parse_model patch'i düzeltildi (FRM eklendi).")
+            print("  base_modules set'ine C2f_CAM eklendi")
+
+    # 2.b) repeat_modules set'ine C2f_CAM ekle (yoksa)
+    rep_has = re.search(r"repeat_modules\s*=\s*frozenset\([\s\S]{0,2000}?C2f_CAM", content) is not None
+    if "repeat_modules" in content and not rep_has:
+        content, n_rep = re.subn(r"(\bC2f\b\s*,)", r"\1\n            C2f_CAM,  # SKYWATCH", content, count=1)
+        if n_rep:
+            modified = True
+            print("  repeat_modules set'ine C2f_CAM eklendi")
+
+    # 2.c) parse_model icine FRM ozel-case ekle (yoksa)
+    # Hedef blok: "elif m is FRM:" -> args=[c1,c2] ve c2 tracking dogru olsun.
+    if "elif m is FRM" not in content:
+        # parse_model icinde "elif m in frozenset({" bloklarindan sonra, "else:" oncesi bir yere eklemeyi dene
+        frm_block = (
+            "\n        elif m is FRM:  # SKYWATCH: Feature Refinement Module — output channels = input channels\n"
+            "            c1 = ch[f]\n"
+            "            c2 = args[0] if args else c1  # optional explicit c2, default = c1\n"
+            "            args = [c1, c2]\n"
+        )
+        # Concat ozel-case'inden hemen sonra eklemek genelde guvenli
+        content, n_frm = re.subn(r"(elif m is Concat:\n\s+c2 = sum\(ch\[x\] for x in f\)\n)", r"\1" + frm_block, content, count=1)
+        if n_frm:
+            modified = True
+            print("  parse_model'e FRM ozel-case eklendi")
         else:
-            # Hic patch yoksa standart C2f yanina ekle
-            content, c2 = re.subn(r'\bC2f\b(?=\s*,)', 'C2f, C2f_CAM, FRM', content, count=1)
-            content, c3 = re.subn(r'\bC2f,', 'C2f, C2f_CAM, FRM,', content, count=1)
-            
-            if c2 or c3:
+            # Fallback: ilk "else:" ten once eklemeyi dene
+            content, n_frm2 = re.subn(r"(\n\s+else:\n\s+c2 = ch\[f\]\n)", frm_block + r"\1", content, count=1)
+            if n_frm2:
                 modified = True
-                print("  parse_model tuple'ina C2f_CAM ve FRM basariyla eklendi.")
+                print("  parse_model'e FRM ozel-case eklendi (fallback)")
             else:
-                print("  UYARI: parse_model tuple'i bulunamadi. Manuel kontrol gerekebilir.")
+                print("  UYARI: FRM ozel-case otomatik eklenemedi. tasks.py manuel kontrol gerekebilir.")
 
     if modified:
         tasks_path.write_text(content, encoding="utf-8")

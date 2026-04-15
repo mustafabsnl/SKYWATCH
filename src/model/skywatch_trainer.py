@@ -185,9 +185,9 @@ class SkyWatchTrainer(DetectionTrainer):
 # Ana Egitim Fonksiyonlari
 # ──────────────────────────────────────────────────────────────────────
 BASE_DIR  = Path(__file__).parents[2]
-DATA_YAML = BASE_DIR / "src/model/data.yaml"
-RUNS_DIR  = BASE_DIR / "src/model/runs"
-SW_YAML   = BASE_DIR / "ultralytics/ultralytics/cfg/models/v8/skywatch-det.yaml"
+DATA_YAML = BASE_DIR / "src" / "model" / "data.yaml"
+RUNS_DIR  = BASE_DIR / "src" / "model" / "runs"
+SW_YAML   = BASE_DIR / "src" / "ultralytics_patch" / "cfg" / "models" / "skywatch" / "skywatch-det.yaml"
 
 COMMON_ARGS = dict(
     data=str(DATA_YAML.resolve()),
