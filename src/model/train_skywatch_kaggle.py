@@ -396,9 +396,117 @@ def _find_images_train_root() -> Path:
 
 
 # ══════════════════════════════════════════════════════════
-# SNAPSHOT SİSTEMİ (Callback-based)
-# PC_EGITIM_KODLARI/train.py ile aynı mantık, period = 5 epoch
+# SNAPSHOT SİSTEMİ (Thread-based Monitor)
+# DDP modunda callback'ler subprocess'e aktarılmıyor!
+# Bu yüzden dosya sistemini izleyen thread kullanıyoruz.
 # ══════════════════════════════════════════════════════════
+
+def start_snapshot_monitor(run_dir: Path, checkpoint_dir: Path,
+                           every_n: int = 5, poll_interval: int = 30):
+    """
+    DDP-uyumlu arka plan snapshot monitörü.
+    
+    results.csv'yi izler, her N epoch'ta tam snapshot oluşturur.
+    Callback'ler DDP subprocess'ine aktarılmadığı için bu yöntem kullanılır.
+    
+    Args:
+        run_dir: Eğitim çıktı dizini (runs/skywatch_det_phase1)
+        checkpoint_dir: Snapshot'ların kaydedileceği dizin
+        every_n: Kaç epoch'ta bir snapshot alınacak
+        poll_interval: Kaç saniyede bir kontrol edilecek
+    """
+    import threading
+    import time as _time
+    import datetime as _dt
+
+    def _save_snapshot(epoch: int):
+        """Tam snapshot klasörü oluşturur."""
+        try:
+            checkpoint_dir.mkdir(parents=True, exist_ok=True)
+            snap_dir = checkpoint_dir / f"snapshot_epoch_{epoch}"
+            snap_dir.mkdir(exist_ok=True)
+
+            # 1. Weights kopyala
+            w_src = run_dir / "weights"
+            w_dst = snap_dir / "weights"
+            w_dst.mkdir(exist_ok=True)
+            for wname in ["best.pt", "last.pt", f"epoch{epoch}.pt"]:
+                src = w_src / wname
+                if src.exists():
+                    shutil.copy2(src, w_dst / wname)
+
+            # 2. Tüm dosyaları kopyala (png, jpg, csv, yaml, json)
+            for pattern in ["*.png", "*.jpg", "*.jpeg", "*.csv", "*.yaml", "*.json"]:
+                for f in run_dir.glob(pattern):
+                    if f.is_file():
+                        shutil.copy2(f, snap_dir / f.name)
+
+            # 3. Training grafikleri oluştur
+            try:
+                _generate_training_plots(snap_dir / "results.csv", snap_dir)
+            except Exception:
+                pass
+
+            # 4. Metrik özeti
+            metrics = {}
+            csv_path = run_dir / "results.csv"
+            if csv_path.exists():
+                with open(csv_path, newline='', encoding='utf-8') as f:
+                    rows = list(csv.DictReader(f))
+                if rows:
+                    last = rows[-1]
+                    metrics = {k.strip(): v.strip() for k, v in last.items() if k and v}
+
+            summary = {
+                "epoch": epoch,
+                "timestamp": _dt.datetime.now().isoformat(),
+                "saved_weights": [p.name for p in w_dst.glob("*.pt")],
+                "metrics": metrics,
+            }
+            with open(snap_dir / "snapshot_summary.json", "w", encoding="utf-8") as f:
+                json.dump(summary, f, indent=2, ensure_ascii=False)
+
+            # Boyut raporu
+            total_mb = sum(p.stat().st_size for p in snap_dir.rglob("*") if p.is_file()) / 1e6
+            n_weights = len(list(w_dst.glob("*.pt")))
+            print(f"\n  📸 [SNAP] snapshot_epoch_{epoch}/ ({n_weights} weight, {total_mb:.1f} MB)")
+
+        except Exception as e:
+            print(f"\n  ❌ [SNAP ERROR] Epoch {epoch}: {e}")
+
+    def _monitor():
+        """Arka planda results.csv'yi izle, snapshot al."""
+        last_snapped = 0
+        print(f"  [MONITOR] Başladı — her {every_n} epoch'ta snapshot, {poll_interval}s aralık")
+        
+        while True:
+            try:
+                csv_path = run_dir / "results.csv"
+                if csv_path.exists():
+                    with open(csv_path, newline='', encoding='utf-8') as f:
+                        # Header satırını çıkar
+                        epoch_count = max(0, sum(1 for _ in csv.reader(f)) - 1)
+                    
+                    # Snapshot zamanı geldi mi?
+                    if epoch_count > last_snapped and epoch_count % every_n == 0:
+                        # Weight dosyasının yazılmasını bekle (max 90s)
+                        w_last = run_dir / "weights" / "last.pt"
+                        waited = 0
+                        while not w_last.exists() and waited < 90:
+                            _time.sleep(5)
+                            waited += 5
+                        
+                        _save_snapshot(epoch_count)
+                        last_snapped = epoch_count
+                        
+            except Exception as e:
+                pass  # Hata olursa sessizce devam et
+            
+            _time.sleep(poll_interval)
+
+    t = threading.Thread(target=_monitor, daemon=True, name="SnapshotMonitor")
+    t.start()
+    return t
 
 def _generate_training_plots(results_csv: Path, out_dir: Path):
     """results.csv'den loss, metrik ve LR grafiklerini üretir."""
@@ -522,100 +630,6 @@ def _generate_val_curves(metrics, snap_dir: Path, data: dict):
                 pass
 
 
-def _make_snapshot_callbacks(period: int, save_dir: Path):
-    """Her *period* epoch'ta tam bir snapshot oluşturan callback çifti döner.
-
-    Returns:
-        (on_train_start_cb, on_fit_epoch_end_cb) — iki callback fonksiyonu.
-        on_train_start_cb: validator'a plots hook'u ekler.
-        on_fit_epoch_end_cb: asıl snapshot işlemini yapar.
-    """
-
-    def _on_train_start(trainer):
-        """Validator'a on_val_start hook'u ekle: snapshot epoch'larında plots=True zorla."""
-        v = getattr(trainer, "validator", None)
-        if v is None:
-            return
-
-        def _force_plots_for_snapshot(validator):
-            epoch = trainer.epoch + 1
-            if epoch % period == 0:
-                validator.args.plots = True
-
-        v.add_callback("on_val_start", _force_plots_for_snapshot)
-
-    def _on_fit_epoch_end(trainer):
-        epoch = trainer.epoch + 1  # 0-indexed → 1-indexed
-        if epoch % period != 0:
-            return
-
-        snap_dir = save_dir / f"snapshot_epoch_{epoch}"
-        snap_dir.mkdir(parents=True, exist_ok=True)
-
-        # ── 1. Weights kopyala ──
-        snap_weights = snap_dir / "weights"
-        snap_weights.mkdir(exist_ok=True)
-        src_weights = save_dir / "weights"
-        for name in ("best.pt", "last.pt"):
-            src = src_weights / name
-            if src.exists():
-                shutil.copy2(str(src), str(snap_weights / name))
-
-        # ── 2. Mevcut tüm dosyaları kopyala (png, jpg, csv, yaml, json) ──
-        for pattern in ("*.png", "*.jpg", "*.csv", "*.yaml", "*.json"):
-            for src_file in save_dir.glob(pattern):
-                if src_file.is_file():
-                    shutil.copy2(str(src_file), str(snap_dir / src_file.name))
-
-        # ── 3. results.png'yi Ultralytics ile oluştur ──
-        try:
-            from ultralytics.utils.plotting import plot_results as _ul_plot_results
-
-            _ul_plot_results(file=snap_dir / "results.csv", dir=snap_dir, on_plot=None)
-        except Exception:
-            pass
-
-        # ── 4. Confusion Matrix oluştur ──
-        try:
-            v = trainer.validator
-            if v and hasattr(v, "confusion_matrix") and v.confusion_matrix is not None:
-                v.confusion_matrix.plot(save_dir=snap_dir, normalize=False, on_plot=None)
-                v.confusion_matrix.plot(save_dir=snap_dir, normalize=True, on_plot=None)
-        except Exception as exc:
-            print(f"  ⚠️  Confusion matrix hatası (epoch {epoch}): {exc}")
-
-        # ── 5. F1 / P / R / PR eğrileri oluştur ──
-        try:
-            v = trainer.validator
-            if v and hasattr(v, "metrics"):
-                _generate_val_curves(v.metrics, snap_dir, trainer.data)
-        except Exception as exc:
-            print(f"  ⚠️  Curve grafik hatası (epoch {epoch}): {exc}")
-
-        # ── 6. Kendi eğitim grafikleri (loss, metric, LR) ──
-        try:
-            _generate_training_plots(snap_dir / "results.csv", snap_dir)
-        except Exception as exc:
-            print(f"  ⚠️  Snapshot grafik hatası (epoch {epoch}): {exc}")
-
-        # ── 7. Metrik özeti kaydet ──
-        metrics = {}
-        if hasattr(trainer, "metrics") and trainer.metrics:
-            metrics = {k: round(v, 4) if isinstance(v, float) else v for k, v in trainer.metrics.items()}
-
-        summary = {
-            "epoch": epoch,
-            "timestamp": datetime.now().isoformat(),
-            "metrics": metrics,
-        }
-        with open(str(snap_dir / "snapshot_summary.json"), "w", encoding="utf-8") as f:
-            json.dump(summary, f, indent=2, ensure_ascii=False)
-
-        print(f"\n📸 Snapshot kaydedildi: {snap_dir}")
-
-    return _on_train_start, _on_fit_epoch_end
-
-
 def _flush_gpu():
     """Tüm GPU belleğini agresif şekilde serbest bırak (faz geçişlerinde OOM önlemi)."""
     import gc
@@ -661,6 +675,9 @@ def train_phase1(n_gpu: int) -> str:
     run_dir  = RUNS_DIR / PHASE1["name"]
     ckpt_dir = CHECKPOINT_DIR / "phase1"
 
+    # Thread-based snapshot monitörü başlat (DDP uyumlu)
+    start_snapshot_monitor(run_dir, ckpt_dir, every_n=CHECKPOINT_EVERY_N, poll_interval=60)
+
     trainer = _build_trainer({
         "model":   str(MODEL_YAML),
         "data":    str(DATA_YAML),
@@ -668,9 +685,6 @@ def train_phase1(n_gpu: int) -> str:
         "device":  device,
         **PHASE1,
     })
-    snap_train_start, snap_epoch_end = _make_snapshot_callbacks(CHECKPOINT_EVERY_N, run_dir)
-    trainer.add_callback("on_train_start", snap_train_start)
-    trainer.add_callback("on_fit_epoch_end", snap_epoch_end)
     trainer.train()
 
     make_final_zip(run_dir, ckpt_dir, label="phase1_final")
@@ -704,6 +718,9 @@ def train_phase2(phase1_weights: str, n_gpu: int) -> str:
     run_dir  = RUNS_DIR / PHASE2["name"]
     ckpt_dir = CHECKPOINT_DIR / "phase2"
 
+    # Thread-based snapshot monitörü başlat (DDP uyumlu)
+    start_snapshot_monitor(run_dir, ckpt_dir, every_n=CHECKPOINT_EVERY_N, poll_interval=60)
+
     trainer = _build_trainer({
         "model":   phase1_weights,   # Faz 1 best.pt → fine-tune başlangıcı
         "data":    str(DATA_YAML),
@@ -711,9 +728,6 @@ def train_phase2(phase1_weights: str, n_gpu: int) -> str:
         "device":  device,
         **PHASE2,
     })
-    snap_train_start, snap_epoch_end = _make_snapshot_callbacks(CHECKPOINT_EVERY_N, run_dir)
-    trainer.add_callback("on_train_start", snap_train_start)
-    trainer.add_callback("on_fit_epoch_end", snap_epoch_end)
     trainer.train()
 
     make_final_zip(run_dir, ckpt_dir, label="phase2_final")

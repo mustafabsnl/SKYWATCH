@@ -36,8 +36,8 @@ class SkyWatchBboxLoss(BboxLoss):
         reg_max: int = 16,
         small_face_thr: float = 0.05,
         mid_face_thr: float = 0.15,
-        small_w: float = 2.0,
-        mid_w: float = 1.3,
+        small_w: float = 1.5,      # 2.0 → 1.5 (yumuşatıldı)
+        mid_w: float = 1.15,       # 1.3 → 1.15 (yumuşatıldı)
     ):
         """Initialize SkyWatchBboxLoss.
 
@@ -120,25 +120,18 @@ class SkyWatchBboxLoss(BboxLoss):
         iou = bbox_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask], xywh=False, CIoU=True)
 
         # ── SKYWATCH ÖZELLİĞİ: DR Loss (Distributional Ranking) ─────
-        # Pozitif örnekleri kendi içlerinde sırala. Düşük kaliteli/belirsiz
-        # kutuları (Uncertainty Filtering) filtrele ve şahin gözlü adaylara ağırlık ver.
+        # Pozitif örnekleri IoU'ya göre sırala, daha dar aralıkta ağırlıkla (0.85-1.15)
         iou_scores = iou.detach().clamp(min=0).unsqueeze(-1)  # (N_pos, 1)
         if iou_scores.numel() > 1:
             iou_min, iou_max = iou_scores.min(), iou_scores.max()
             iou_rank = (iou_scores - iou_min) / (iou_max - iou_min + 1e-6)
-            # Tavan baskısı kaldırıldı: Kaliteli kutulara 1.5x'e kadar bonus, kötü kutulara 0.5x zayıflatma
-            dr_weight = 0.5 + 1.0 * iou_rank  
+            # Yumuşatıldı: 0.85-1.15 arası (önceki: 0.5-1.5)
+            dr_weight = 0.85 + 0.3 * iou_rank  
             weight = weight * dr_weight
 
-        # ── SKYWATCH ÖZELLİĞİ: GAOC (Alpha-IoU / Gaussian Mantığı) ────────
-        # Đặc biệt küçük yüzlerde (size_w > 1) model hedefe yaklaştıkça gradyanın
-        # ölmemesi (Vanishing Gradient) ve tam sıfıra sıfır oturması (mAP50-95 iyileştirmesi)
-        # için hata eksponansiyel büyütülür (üs < 1.0)
-        gaoc_error = (1.0 - iou).clamp(min=1e-6).unsqueeze(-1)  # (N_pos, 1)
-        # Hata küçükken (örneğin 0.04), karekökü (0.2) hatadan daha büyüktür. Bu da gradyanı diriltir!
-        gaoc_penalty = torch.where(size_w > 1.0, gaoc_error ** 0.5, gaoc_error)
-        
-        loss_iou = (gaoc_penalty * weight).sum() / target_scores_sum
+        # ── IoU Loss (Standart CIoU) ────────
+        # GAOC sqrt penalty kaldırıldı - loss'u çok artırıyordu
+        loss_iou = ((1.0 - iou).unsqueeze(-1) * weight).sum() / target_scores_sum
 
         # DFL (Yeniden yapılandırılmış GFL V2)
         if self.dfl_loss:
@@ -148,9 +141,9 @@ class SkyWatchBboxLoss(BboxLoss):
             p_dist = F.softmax(pred_dist[fg_mask].view(-1, 4, self.dfl_loss.reg_max), dim=-1)
             sharpness = p_dist.max(dim=-1)[0].mean(dim=-1, keepdim=True)  # (N_pos, 1)
             
-            # Kalite odaklı Scale: Sharpness 1.0 ise weight=1.0 / Sharpness 0.2 ise weight=1.8
-            # Daha yumuşak — aşırı agresif DFL loss'u önle
-            gfl_weight = 2.0 - (1.0 * sharpness.detach()) 
+            # Kalite odaklı Scale: Sharpness 1.0 ise weight=1.0 / Sharpness 0.2 ise weight=1.24
+            # Çok yumuşak — DFL loss artışını minimize et
+            gfl_weight = 1.3 - (0.3 * sharpness.detach()) 
 
             target_ltrb = bbox2dist(anchor_points, target_bboxes, self.dfl_loss.reg_max - 1)
             loss_dfl = (
