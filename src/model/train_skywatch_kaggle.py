@@ -420,7 +420,7 @@ def start_snapshot_monitor(run_dir: Path, checkpoint_dir: Path,
     import datetime as _dt
 
     def _save_snapshot(epoch: int):
-        """Tam snapshot klasörü oluşturur."""
+        """Tam snapshot klasörü oluşturur ve ZIP'ler (Kaggle output için)."""
         try:
             checkpoint_dir.mkdir(parents=True, exist_ok=True)
             snap_dir = checkpoint_dir / f"snapshot_epoch_{epoch}"
@@ -466,13 +466,26 @@ def start_snapshot_monitor(run_dir: Path, checkpoint_dir: Path,
             with open(snap_dir / "snapshot_summary.json", "w", encoding="utf-8") as f:
                 json.dump(summary, f, indent=2, ensure_ascii=False)
 
-            # Boyut raporu
-            total_mb = sum(p.stat().st_size for p in snap_dir.rglob("*") if p.is_file()) / 1e6
+            # 5. KRITIK: ZIP oluştur (Kaggle output için)
+            import zipfile
+            zip_name = f"snapshot_epoch_{epoch}.zip"
+            zip_path = WORKING / zip_name  # /kaggle/working/ altına (output'ta görünür!)
+            
+            with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+                for f in snap_dir.rglob("*"):
+                    if f.is_file():
+                        arcname = f.relative_to(snap_dir.parent)
+                        zf.write(f, arcname)
+            
+            zip_mb = zip_path.stat().st_size / 1e6
+            snap_mb = sum(p.stat().st_size for p in snap_dir.rglob("*") if p.is_file()) / 1e6
             n_weights = len(list(w_dst.glob("*.pt")))
-            print(f"\n  📸 [SNAP] snapshot_epoch_{epoch}/ ({n_weights} weight, {total_mb:.1f} MB)")
+            print(f"\n  📸 [SNAP] snapshot_epoch_{epoch}.zip → {zip_mb:.1f} MB (klasör: {snap_mb:.1f} MB, {n_weights} weight)")
 
         except Exception as e:
             print(f"\n  ❌ [SNAP ERROR] Epoch {epoch}: {e}")
+            import traceback
+            traceback.print_exc()
 
     def _monitor():
         """Arka planda results.csv'yi izle, snapshot al."""
