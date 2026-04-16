@@ -62,25 +62,25 @@ MODEL_YAML     = "skywatch-det.yaml"
 DATA_YAML      = None   # prepare_data() tarafından belirlenir
 
 # Her kaç epoch'ta snapshot alinsin (klasor yapisi: snapshot_epoch_N/)
-CHECKPOINT_EVERY_N = 5
+CHECKPOINT_EVERY_N = 3  # 12 epoch için 3'te bir (epoch 3, 6, 9, 12)
 
 # ══════════════════════════════════════════════════════════
-# FAZ 1 HİPERPARAMETRELERİ
+# FAZ 1 HİPERPARAMETRELERİ (12 EPOCH HIZLI TEST)
 # ══════════════════════════════════════════════════════════
 PHASE1 = dict(
-    epochs          = 100,
+    epochs          = 12,          # Hızlı test için 12 epoch
     imgsz           = 640,
     batch           = 8,           # 2xT4: 4 per GPU — OOM olmasin (nbs=64 ile grad accum)
-    lr0             = 0.001,       # Başlangıç LR
-    lrf             = 0.01,        # Final LR katsayısı (lr0 * lrf)
+    lr0             = 0.002,       # 12 epoch için daha yüksek başlangıç LR
+    lrf             = 0.1,         # 12 epoch için daha yüksek final LR (lr0 * 0.1 = 0.0002)
     momentum        = 0.937,
     weight_decay    = 0.0005,
-    warmup_epochs   = 5,
+    warmup_epochs   = 2,           # 12 epoch için kısa warmup
     warmup_momentum = 0.8,
     warmup_bias_lr  = 0.1,
     optimizer       = "AdamW",
-    patience        = 50,
-    save_period     = 5,           # ultralytics epoch5.pt, epoch10.pt... kaydetsin
+    patience        = 10,          # 12 epoch için düşük patience
+    save_period     = 3,           # Her 3 epoch'ta weight kaydet
     # Augmentation — WIDER FACE: sokak kamerası simülasyonu
     # mosaic: kalabalık sahneler için kritik
     # blur varyasyonu: haar-like 'Hard' difficulty için
@@ -99,7 +99,7 @@ PHASE1 = dict(
     # Dataset 10px~500px yüz içeriyor → multi_scale önemli
     # OOM riski: True yapmak istersen batch=8'e düşür
     multi_scale     = False,
-    close_mosaic    = 10,
+    close_mosaic    = 6,           # 12 epoch için erken close (epoch 6'da mosaic kapat)
     # Loss — Detection modu (pose/kobj yok)
     # SkyWatchBboxLoss zaten küçük yüzlere 2x ağırlık veriyor,
     # bu yüzden gain'leri biraz düşürüyoruz (standart: box=7.5, dfl=1.5)
@@ -116,25 +116,24 @@ PHASE1 = dict(
 )
 
 # ══════════════════════════════════════════════════════════
-# FAZ 2 HİPERPARAMETRELERİ (Fine-tune)
+# FAZ 2 DEVRE DIŞI (12 EPOCH HIZLI TEST İÇİN)
+# 12 epoch için sadece Phase 1 yeterli, Phase 2 atlanacak
 # ══════════════════════════════════════════════════════════
 PHASE2 = dict(
-    epochs          = 300,
+    epochs          = 0,           # Phase 2 devre dışı (12 epoch için gereksiz)
     imgsz           = 640,
-    batch           = 8,           # Faz 2'de sabit batch
-    lr0             = 0.0002,      # Düşük LR (fine-tune)
-    lrf             = 0.005,       # Çok küçük final LR
+    batch           = 8,
+    lr0             = 0.0002,
+    lrf             = 0.005,
     momentum        = 0.937,
     weight_decay    = 0.0005,
-    warmup_epochs   = 1.0,         # Minimal warmup
+    warmup_epochs   = 1.0,
     warmup_momentum = 0.8,
     warmup_bias_lr  = 0.01,
     optimizer       = "AdamW",
-    patience        = 80,          # Daha uzun sabır
+    patience        = 80,
     save_period     = 25,
-    # Fine-tune: Daha az agresif augmentation
     mosaic          = 0.5,
-    # Fine-tune: Copy-Paste'i azalt (daha temiz fine-tune)
     copy_paste      = 0.05,
     copy_paste_mode = "flip",
     mixup           = 0.0,
@@ -147,12 +146,9 @@ PHASE2 = dict(
     erasing         = 0.0,
     multi_scale     = False,
     close_mosaic    = 50,
-    # Loss — Detection modu (pose/kobj yok)
-    # Fine-tune: Loss gain'leri Phase 1 ile aynı
     box             = 7.5,
     cls             = 0.5,
     dfl             = 1.5,
-    # Kaydetme
     name            = "skywatch_det_phase2",
     exist_ok        = True,
     plots           = True,
@@ -689,7 +685,8 @@ def train_phase1(n_gpu: int) -> str:
     ckpt_dir = CHECKPOINT_DIR / "phase1"
 
     # Thread-based snapshot monitörü başlat (DDP uyumlu)
-    start_snapshot_monitor(run_dir, ckpt_dir, every_n=CHECKPOINT_EVERY_N, poll_interval=60)
+    # 12 epoch için daha sık kontrol (30 saniye)
+    start_snapshot_monitor(run_dir, ckpt_dir, every_n=CHECKPOINT_EVERY_N, poll_interval=30)
 
     trainer = _build_trainer({
         "model":   str(MODEL_YAML),
@@ -716,41 +713,14 @@ def train_phase1(n_gpu: int) -> str:
 # ══════════════════════════════════════════════════════════
 
 def train_phase2(phase1_weights: str, n_gpu: int) -> str:
-    """Faz 2: best.pt'den dusuk LR ile uzun fine-tune."""
-    from checkpoint_zipper import make_final_zip
-
+    """Faz 2: 12 epoch test için ATLANACAK."""
     print("\n" + "="*55)
-    print("  FAZ 2 — Fine-tune (SkyWatchTrainer, Dusuk LR)")
-    print(f"  Baslangic:  {phase1_weights}")
-    print(f"  Epoch: {PHASE2['epochs']} | LR0: {PHASE2['lr0']} | Batch: {PHASE2['batch']}")
-    print(f"  Patience: {PHASE2['patience']}")
-    print(f"  Snapshot her {CHECKPOINT_EVERY_N} epoch'ta: {CHECKPOINT_DIR / 'phase2'}")
+    print("  FAZ 2 — ATLANDI (12 epoch hızlı test)")
+    print(f"  Phase 1 best.pt kullanılacak: {phase1_weights}")
     print("="*55)
-
-    device   = "0,1" if n_gpu >= 2 else "0"
-    run_dir  = RUNS_DIR / PHASE2["name"]
-    ckpt_dir = CHECKPOINT_DIR / "phase2"
-
-    # Thread-based snapshot monitörü başlat (DDP uyumlu)
-    start_snapshot_monitor(run_dir, ckpt_dir, every_n=CHECKPOINT_EVERY_N, poll_interval=60)
-
-    trainer = _build_trainer({
-        "model":   phase1_weights,   # Faz 1 best.pt → fine-tune başlangıcı
-        "data":    str(DATA_YAML),
-        "project": str(RUNS_DIR),
-        "device":  device,
-        **PHASE2,
-    })
-    trainer.train()
-
-    make_final_zip(run_dir, ckpt_dir, label="phase2_final")
-
-    del trainer
-    _flush_gpu()
-
-    best = run_dir / "weights" / "best.pt"
-    print(f"  Final model: {best}")
-    return str(best)
+    
+    # Phase 1 best.pt'yi direkt döndür
+    return phase1_weights
 
 
 # ══════════════════════════════════════════════════════════
