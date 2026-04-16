@@ -1,9 +1,9 @@
 """
 SKYWATCH-Det — Kaggle 2xT4 Eğitim Scripti
 ==========================================
-2 Fazlı Eğitim Stratejisi:
-  Faz 1 → Normal LR, başlangıç eğitimi
-  Faz 2 → best.pt'den devam, düşük LR + yüksek epoch (fine-tune)
+Tek Fazlı Eğitim — 50 EPOCH:
+  Faz 1 → 50 epoch | Normal LR, tam augmentasyon, backbone eğitimi
+  Faz 2 → Devre dışı (gerekirse sonradan --phase 2 ile fine-tune)
 
 Kullanım (Kaggle Notebook):
   !python train_skywatch_kaggle.py --phase 1
@@ -62,33 +62,34 @@ MODEL_YAML     = "skywatch-det.yaml"
 DATA_YAML      = None   # prepare_data() tarafından belirlenir
 
 # Her kaç epoch'ta snapshot alinsin (klasor yapisi: snapshot_epoch_N/)
-CHECKPOINT_EVERY_N = 3  # 12 epoch için 3'te bir (epoch 3, 6, 9, 12)
+CHECKPOINT_EVERY_N = 5  # 50 epoch için 5'te bir (epoch 5, 10, 15, ..., 50)
 
 # ══════════════════════════════════════════════════════════
-# FAZ 1 HİPERPARAMETRELERİ (12 EPOCH HIZLI TEST)
+# FAZ 1 HİPERPARAMETRELERİ — 50 EPOCH TAM EĞİTİM
+# Tek faz, 50 epoch, Faz 2 devre dışı
 # ══════════════════════════════════════════════════════════
 PHASE1 = dict(
-    epochs          = 12,          # Hızlı test için 12 epoch
+    epochs          = 50,          # Tek faz tam eğitim
     imgsz           = 640,
-    batch           = 8,           # 2xT4: 4 per GPU — OOM olmasin (nbs=64 ile grad accum)
-    lr0             = 0.002,       # 12 epoch için daha yüksek başlangıç LR
-    lrf             = 0.1,         # 12 epoch için daha yüksek final LR (lr0 * 0.1 = 0.0002)
+    batch           = 8,           # 2xT4: 4 per GPU — OOM olmasın (nbs=64 ile grad accum)
+    nbs             = 64,          # Nominal batch: efektif batch = 8 * (64/8) = 64
+    lr0             = 0.001,       # 35 epoch için standart başlangıç LR
+    lrf             = 0.01,        # Final LR = lr0 * lrf = 0.00001 (derin decay)
     momentum        = 0.937,
     weight_decay    = 0.0005,
-    warmup_epochs   = 2,           # 12 epoch için kısa warmup
+    warmup_epochs   = 3,           # 50 epoch için uygun warmup (%6)
     warmup_momentum = 0.8,
     warmup_bias_lr  = 0.1,
     optimizer       = "AdamW",
-    patience        = 10,          # 12 epoch için düşük patience
-    save_period     = 3,           # Her 3 epoch'ta weight kaydet
+    patience        = 25,          # 50 epoch için yeterli patience
+    save_period     = 5,           # Her 5 epoch'ta weight kaydet
     # Augmentation — WIDER FACE: sokak kamerası simülasyonu
-    # mosaic: kalabalık sahneler için kritik
-    # blur varyasyonu: haar-like 'Hard' difficulty için
-    mosaic          = 0.75,
+    # mosaic=1.0: kalabalık sahneler (%85 küçük yüz) için kritik, tam güç
+    mosaic          = 1.0,
     # Crowded scenes: Copy-Paste augmentation
-    copy_paste      = 0.1,
+    copy_paste      = 0.15,
     copy_paste_mode = "flip",
-    mixup           = 0.05,
+    mixup           = 0.1,
     degrees         = 10.0,
     fliplr          = 0.5,
     perspective     = 0.0005,
@@ -96,16 +97,14 @@ PHASE1 = dict(
     hsv_s           = 0.7,
     hsv_v           = 0.4,
     erasing         = 0.1,
-    # Dataset 10px~500px yüz içeriyor → multi_scale önemli
-    # OOM riski: True yapmak istersen batch=8'e düşür
+    # Dataset 10px~500px yüz içeriyor → multi_scale faydalı ama OOM riski
     multi_scale     = False,
-    close_mosaic    = 6,           # 12 epoch için erken close (epoch 6'da mosaic kapat)
-    # Loss — Detection modu (pose/kobj yok)
-    # SkyWatchBboxLoss zaten küçük yüzlere 2x ağırlık veriyor,
-    # bu yüzden gain'leri biraz düşürüyoruz (standart: box=7.5, dfl=1.5)
-    box             = 7.5,
+    close_mosaic    = 15,          # Son 15 epoch mosaic kapat → val metriği gerçekçileşir
+    # Loss ağırlıkları — %85 küçük yüz için box loss yüksek tutulur
+    # SkyWatchBboxLoss zaten küçük yüzlere 1.5x ek ağırlık veriyor
+    box             = 8.5,
     cls             = 0.5,
-    dfl             = 1.5,
+    dfl             = 2.0,
     # Kaydetme
     name            = "skywatch_det_phase1",
     exist_ok        = True,
@@ -116,25 +115,28 @@ PHASE1 = dict(
 )
 
 # ══════════════════════════════════════════════════════════
-# FAZ 2 DEVRE DIŞI (12 EPOCH HIZLI TEST İÇİN)
-# 12 epoch için sadece Phase 1 yeterli, Phase 2 atlanacak
+# FAZ 2 — DEVRE DIŞI
+# Faz 1 zaten 50 epoch tam eğitim yaptı, fine-tune gerekmez.
+# İstersen sonradan: python train_skywatch_kaggle.py --phase 2
 # ══════════════════════════════════════════════════════════
 PHASE2 = dict(
-    epochs          = 0,           # Phase 2 devre dışı (12 epoch için gereksiz)
+    epochs          = 0,           # DEVRE DIŞI — Faz 1 zaten 50 epoch tam eğitim
     imgsz           = 640,
     batch           = 8,
-    lr0             = 0.0002,
-    lrf             = 0.005,
+    nbs             = 64,
+    lr0             = 0.0002,      # Faz 1'in ~1/5'i — ince ayar için düşük LR
+    lrf             = 0.01,        # Final LR = lr0 * lrf = 0.000002
     momentum        = 0.937,
     weight_decay    = 0.0005,
-    warmup_epochs   = 1.0,
+    warmup_epochs   = 1,           # Kısa warmup (fine-tune)
     warmup_momentum = 0.8,
     warmup_bias_lr  = 0.01,
     optimizer       = "AdamW",
-    patience        = 80,
-    save_period     = 25,
-    mosaic          = 0.5,
-    copy_paste      = 0.05,
+    patience        = 10,          # 15 epoch'ta erken durdurma eşiği
+    save_period     = 5,
+    # Azaltılmış augmentasyon — fine-tune aşamasında stabilite öncelikli
+    mosaic          = 0.3,
+    copy_paste      = 0.0,
     copy_paste_mode = "flip",
     mixup           = 0.0,
     degrees         = 5.0,
@@ -145,10 +147,11 @@ PHASE2 = dict(
     hsv_v           = 0.3,
     erasing         = 0.0,
     multi_scale     = False,
-    close_mosaic    = 50,
-    box             = 7.5,
+    close_mosaic    = 12,          # Neredeyse tüm fine-tune boyunca mosaic kapalı
+    # Loss — Faz 1 ile tutarlı
+    box             = 8.5,
     cls             = 0.5,
-    dfl             = 1.5,
+    dfl             = 2.0,
     name            = "skywatch_det_phase2",
     exist_ok        = True,
     plots           = True,
@@ -675,8 +678,9 @@ def train_phase1(n_gpu: int) -> str:
     from checkpoint_zipper import make_final_zip
 
     print("\n" + "="*55)
-    print("  FAZ 1 — Ilk Egitim (SkyWatchTrainer)")
-    print(f"  Epoch: {PHASE1['epochs']} | LR0: {PHASE1['lr0']} | Batch: {PHASE1['batch']}")
+    print("  FAZ 1 — 35 Epoch Backbone Egitimi (SkyWatchTrainer)")
+    print(f"  Epoch: {PHASE1['epochs']} | LR0: {PHASE1['lr0']} | LRf: {PHASE1['lrf']}")
+    print(f"  Batch: {PHASE1['batch']} (nbs={PHASE1.get('nbs',64)} → efektif 64)")
     print(f"  Snapshot her {CHECKPOINT_EVERY_N} epoch'ta: {CHECKPOINT_DIR / 'phase1'}")
     print("="*55)
 
@@ -685,8 +689,8 @@ def train_phase1(n_gpu: int) -> str:
     ckpt_dir = CHECKPOINT_DIR / "phase1"
 
     # Thread-based snapshot monitörü başlat (DDP uyumlu)
-    # 12 epoch için daha sık kontrol (30 saniye)
-    start_snapshot_monitor(run_dir, ckpt_dir, every_n=CHECKPOINT_EVERY_N, poll_interval=30)
+    # 50 epoch için 60 saniyede bir kontrol (daha uzun eğitim süresi)
+    start_snapshot_monitor(run_dir, ckpt_dir, every_n=CHECKPOINT_EVERY_N, poll_interval=60)
 
     trainer = _build_trainer({
         "model":   str(MODEL_YAML),
@@ -713,14 +717,44 @@ def train_phase1(n_gpu: int) -> str:
 # ══════════════════════════════════════════════════════════
 
 def train_phase2(phase1_weights: str, n_gpu: int) -> str:
-    """Faz 2: 12 epoch test için ATLANACAK."""
+    """Faz 2: Faz 1 best.pt'den devam, düşük LR ile 15 epoch fine-tune."""
+    from checkpoint_zipper import make_final_zip
+
     print("\n" + "="*55)
-    print("  FAZ 2 — ATLANDI (12 epoch hızlı test)")
-    print(f"  Phase 1 best.pt kullanılacak: {phase1_weights}")
+    print("  FAZ 2 — 15 Epoch Fine-Tune (SkyWatchTrainer)")
+    print(f"  Başlangıç ağırlıkları: {phase1_weights}")
+    print(f"  Epoch: {PHASE2['epochs']} | LR0: {PHASE2['lr0']} | LRf: {PHASE2['lrf']}")
+    print(f"  Mosaic: {PHASE2['mosaic']} (azaltılmış fine-tune modu)")
     print("="*55)
-    
-    # Phase 1 best.pt'yi direkt döndür
-    return phase1_weights
+
+    if PHASE2["epochs"] == 0:
+        print("  [ATLANDI] PHASE2 epochs=0 — Phase 1 ağırlıkları döndürülüyor.")
+        return phase1_weights
+
+    device  = "0,1" if n_gpu >= 2 else "0"
+    run_dir = RUNS_DIR / PHASE2["name"]
+    ckpt_dir = CHECKPOINT_DIR / "phase2"
+
+    # Fine-tune snapshot monitörü
+    start_snapshot_monitor(run_dir, ckpt_dir, every_n=CHECKPOINT_EVERY_N, poll_interval=60)
+
+    trainer = _build_trainer({
+        "model":   phase1_weights,   # Faz 1 en iyi ağırlıklardan başla
+        "data":    str(DATA_YAML),
+        "project": str(RUNS_DIR),
+        "device":  device,
+        **PHASE2,
+    })
+    trainer.train()
+
+    make_final_zip(run_dir, ckpt_dir, label="phase2_final")
+
+    del trainer
+    _flush_gpu()
+
+    best = run_dir / "weights" / "best.pt"
+    print(f"  Faz 2 en iyi model: {best}")
+    return str(best)
 
 
 # ══════════════════════════════════════════════════════════
