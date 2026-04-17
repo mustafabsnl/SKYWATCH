@@ -105,10 +105,25 @@ class ChannelValidator:
     def _make_hook(self, layer_idx: int, module_name: str):
         log = self._log
 
+        def _get_channels(t) -> int | None:
+            """Tensor veya tensor listesinden kanal sayısını çıkar."""
+            if isinstance(t, torch.Tensor) and t.ndim >= 2:
+                return t.shape[1]
+            if isinstance(t, (list, tuple)):
+                for item in t:
+                    if isinstance(item, torch.Tensor) and item.ndim >= 2:
+                        return item.shape[1]
+            return None
+
         def hook(module, inp, output):
-            in_ch = inp[0].shape[1] if isinstance(inp, tuple) else inp.shape[1]
-            out_ch = output.shape[1]
-            log.append(ChannelRow(layer_idx, module_name, in_ch, out_ch))
+            try:
+                first_inp = inp[0] if isinstance(inp, tuple) else inp
+                in_ch = _get_channels(first_inp)
+                out_ch = _get_channels(output)
+                if in_ch is not None and out_ch is not None:
+                    log.append(ChannelRow(layer_idx, module_name, in_ch, out_ch))
+            except Exception:
+                pass
 
         return hook
 
