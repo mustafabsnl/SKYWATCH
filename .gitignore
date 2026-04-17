@@ -21,6 +21,13 @@ datasets/
 # Kaggle'da kagglehub ile indirilir — GitHub'a GITMEZ
 archive/
 
+# ── WIDER FACE Orijinal Dataset (ham hali)
+Kalabalık_yuz_veri_seti/
+
+# ── WIDER FACE → YOLO Dönüştürülmüş Dataset
+# wider_to_yolo.py ile oluşturulur — GitHub'a GITMEZ (GB boyutunda)
+skywatch_wider/
+
 # analyze_dataset.py'nin ürettiği data.yaml (lokal path içerir)
 # Kaggle'da train_skywatch_kaggle.py tarafından dinamik oluşturulur
 archive/data.yaml

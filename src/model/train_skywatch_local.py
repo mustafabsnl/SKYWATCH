@@ -1,15 +1,15 @@
 """
 SKYWATCH-Det — Lokal RTX 3070 Ti Eğitim Scripti
 ================================================
-Dataset : C:/Users/musta/OneDrive/Desktop/SKYWATCH/archive/
-Format  : YOLO normalize (cx cy w h) — labels/ klasörü
+Dataset : WIDER FACE (skywatch_wider/ — wider_to_yolo.py ile donusturuldu)
+Format  : YOLO normalize (cx cy w h) — labels/ klasoru
 Model   : skywatch-det.yaml (C2f_CAM + FRM + P2 head)
 GPU     : RTX 3070 Ti (8 GB VRAM)
 
-Dataset İstatistikleri (analiz sonucundan):
-  - 13,386 train / 3,347 val görüntü
-  - Yüz büyüklüğü: %44.9 tiny, %40.2 small → %85.1 küçük yüz!
-  - Ort. 3.5 yüz/görüntü, max 153 → kalabalık sahneler
+Dataset Istatistikleri:
+  - 12,880 train / 3,226 val goruntu
+  - 156,994 train yuz / 39,112 val yuz
+  - Ort. 12.2 yuz/goruntu, max 1962 — gercek kalabalilik sahneleri
 
 Kullanım:
     python src/model/train_skywatch_local.py
@@ -32,7 +32,7 @@ sys.path.insert(0, str(MODEL_DIR))
 # YOLLAR
 # ══════════════════════════════════════════════════════════════════════
 
-DATASET_YAML = ROOT / "archive" / "data.yaml"
+DATASET_YAML = ROOT / "skywatch_wider" / "data.yaml"
 MODEL_YAML   = ROOT / "src" / "ultralytics_patch" / "cfg" / "models" / "skywatch" / "skywatch-det.yaml"
 RUNS_DIR     = MODEL_DIR / "runs"
 
