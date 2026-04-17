@@ -949,3 +949,109 @@ GFL V2'den: Dağılımın "şeklini" (istatistiklerini) alıp bir kalite puanı 
 GAOC'dan: Bu dağılımı bir Gaussian ile yumuşat/rafine et (özellikle küçük yüzler için).
 
 DR Loss'tan: Bu kalite puanlarını kullanarak kutuları birbirine göre sırala (Ranking).
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+1. Önce gerçek kanal akışını net çıkar
+
+Senin hangi katmanda kaç kanal var, bunu görmen lazım.
+
+Örneğin:
+
+P2 girişinde kaç kanal?
+C2f_CAM çıkışında kaç kanal?
+FRM girişinde kaç kanal?
+
+Bunu görmeden “128 mi olsun 256 mı olsun” kararı tam verilmez.
+
+2. YAML’daki kanal parametresini gerçek akışa yaklaştır
+
+Senin log’a göre C2f_CAM’e 256 kanal geliyor.
+Bu durumda o modülün bağlandığı yerde 128 yerine 256 düşünülmesi gerekebilir.
+
+Ama burada kritik nokta şu:
+
+c1 giriş kanalıdır
+c2 çıkış kanalıdır
+
+YAML’da çoğu zaman yazdığın sayı doğrudan giriş değil, çıkış mantığıyla kullanılır. Senin custom modül parse sırasında standart modül gibi ele alınmadıysa burada kayma olmuş olabilir.
+
+3. Asıl düzeltme büyük ihtimalle tasks.py / parse_model tarafında
+
+Senin kodun içinde yorumlarda da bu söyleniyor:
+
+parse_model modülü tanımazsa yanlış c1 gönderebilir
+sonra modül forward’da kendini düzeltmek zorunda kalır
+
+Yani kalıcı çözüm genelde şudur:
+
+C2f_CAM ve FRM modüllerini parse_model içine düzgün tanıt
+c1, c2, n gibi argümanlar doğru çözülsün
+model en başta doğru inşa edilsin
+
+Bence en kritik nokta bu.
+
+
+
+
+
+
+
+1. En önemli hedef: auto-rebuild hiç çalışmamalı
+
+Şu an _ensure_channels() sistemi kurtarıyor ama ideal durum şu:
+
+model ilk kurulumda doğru kanal alsın
+training sırasında Auto-rebuild logu gelmesin
+
+Yani bunu uyguladıktan sonra ilk testin şu olsun:
+
+modeli başlat
+forward al
+logda Auto-rebuild çıkıyor mu bak
+
+Çıkıyorsa hâlâ mimari tanım tam oturmamış demektir.
+
+2. Forward içinde katman yeniden oluşturmak riskli
+
+Bu dosyada hem C2f_CAM hem FRM, forward sırasında gerekirse katmanları yeniden kuruyor. Bu çok pratik bir kurtarma yöntemi ama bazı riskleri var:
+
+eğitim başlamışsa optimizer eski parametreleri tutuyor olabilir
+yeni oluşturulan layer’lar optimizer tarafından ilk anda düzgün izlenmeyebilir
+reproducibility düşer
+
+Özellikle şu satırlar kritik yapıdadır çünkü modül yeniden inşa ediliyor.
+
+Bu yüzden kalıcı hedef:
+runtime rebuild değil, compile/init aşamasında doğru yapı.
+
+
+
+
+
+Kanal akışı şu sırayla çalışmalı:
+1) Önce giriş kanal sayısını belirle.
+2) Mimariyi bu kanal sayısına göre kur.
+3) Eğitim başlamadan önce preflight doğrulaması ile modelin beklediği kanal ve gerçek kanal eşleşiyor mu kontrol et.
+4) Eşleşme yoksa eğitim başlamadan fail ver; "beklenen kanal / gelen kanal" bilgisini açıkça yazdır.
+5) Kanal konfigürasyonunu güncelle, preflight tekrar geçince eğitimi yeniden başlat.

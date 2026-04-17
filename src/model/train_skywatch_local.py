@@ -222,6 +222,23 @@ def validate_dataset():
     return True
 
 
+def run_channel_preflight(input_channels: int = 3, imgsz: int = 640):
+    """Eğitimden önce model kanal uyumunu doğrula."""
+    from src.tools.channel_validator import validate_model_channels
+
+    print("\n[CHECK] Kanal preflight kontrolü...")
+    result = validate_model_channels(
+        model_yaml=MODEL_YAML,
+        input_channels=input_channels,
+        imgsz=imgsz,
+        verbose=True,
+    )
+    if not result["ok"]:
+        raise RuntimeError(
+            "Kanal doğrulama başarısız. Mimariyi kanal raporuna göre güncelleyip tekrar deneyin."
+        )
+
+
 # ══════════════════════════════════════════════════════════════════════
 # ANA EĞİTİM FONKSİYONLARI
 # ══════════════════════════════════════════════════════════════════════
@@ -237,6 +254,9 @@ def train_skywatch(resume: str = ""):
     print(f"  Batch  : {TRAIN_ARGS['batch']} (nbs={TRAIN_ARGS.get('nbs', 64)} → effektif 64)")
     print(f"  Dataset: {DATASET_YAML}")
     print("="*60)
+
+    # Eğitimden önce kanal-mimari uyumunu zorunlu doğrula
+    run_channel_preflight(input_channels=3, imgsz=TRAIN_ARGS["imgsz"])
 
     overrides = dict(**TRAIN_ARGS)
     if resume:

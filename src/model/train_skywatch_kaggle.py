@@ -362,16 +362,23 @@ def _find_images_train_root() -> Path:
 
     Fallback olarak alt dizinleri de tarar.
     """
-    known = [
-        DATA_RAW,                              # dogrudan root (fareselmenshawii)
-        DATA_RAW / "dataset",                  # alternatif alt klasor
-        DATA_RAW / "merged",                   # eski iamtushara yapisi
+    known: list[Path | None] = [
+        DATA_RAW,
+        DATA_RAW / "dataset" if DATA_RAW else None,
+        DATA_RAW / "merged" if DATA_RAW else None,
         WORKING / "skywatch_data",
     ]
     for root in known:
         if root and (root / "images" / "train").exists():
             print(f"  images/train bulundu: {root}")
             return root
+
+    if DATA_RAW is None:
+        raise FileNotFoundError(
+            "DATA_RAW ayarlanmamış! --skip_data_prep kullanıyorsanız "
+            "önce download_dataset() çağrılmış olmalı veya DATA_RAW "
+            "ortam değişkeni/argüman olarak verilmelidir."
+        )
 
     for dirpath, dirnames, _ in os.walk(str(DATA_RAW)):
         depth = str(dirpath).replace(str(DATA_RAW), "").count(os.sep)
@@ -381,7 +388,6 @@ def _find_images_train_root() -> Path:
         if "images" in dirnames and (Path(dirpath) / "images" / "train").exists():
             return Path(dirpath)
 
-    # Hata: yapiyi goster
     print(f"\n  Dizin yapisi ({DATA_RAW}):")
     for dirpath, dirnames, files in os.walk(str(DATA_RAW)):
         depth = str(dirpath).replace(str(DATA_RAW), "").count(os.sep)
@@ -669,6 +675,25 @@ def _build_trainer(overrides: dict) -> "SkyWatchTrainer":
     return SkyWatchTrainer(overrides=overrides)
 
 
+def _run_channel_preflight(model_yaml: str, input_channels: int = 3, imgsz: int = 640) -> None:
+    """Eğitim öncesi kanal doğrulama: önce kontrol, sonra train."""
+    from src.tools.channel_validator import validate_model_channels
+
+    print("\n" + "=" * 55)
+    print("  KANAL PREFLIGHT KONTROLÜ")
+    print("=" * 55)
+    result = validate_model_channels(
+        model_yaml=model_yaml,
+        input_channels=input_channels,
+        imgsz=imgsz,
+        verbose=True,
+    )
+    if not result["ok"]:
+        raise RuntimeError(
+            "Kanal doğrulama başarısız. Mimariyi kanal raporuna göre güncelleyin ve eğitimi tekrar başlatın."
+        )
+
+
 # ══════════════════════════════════════════════════════════
 # FAZ 1 EĞİTİM
 # ══════════════════════════════════════════════════════════
@@ -678,11 +703,16 @@ def train_phase1(n_gpu: int) -> str:
     from checkpoint_zipper import make_final_zip
 
     print("\n" + "="*55)
-    print("  FAZ 1 — 35 Epoch Backbone Egitimi (SkyWatchTrainer)")
+    print(f"  FAZ 1 — {PHASE1['epochs']} Epoch Tam Egitim (SkyWatchTrainer)")
     print(f"  Epoch: {PHASE1['epochs']} | LR0: {PHASE1['lr0']} | LRf: {PHASE1['lrf']}")
     print(f"  Batch: {PHASE1['batch']} (nbs={PHASE1.get('nbs',64)} → efektif 64)")
     print(f"  Snapshot her {CHECKPOINT_EVERY_N} epoch'ta: {CHECKPOINT_DIR / 'phase1'}")
     print("="*55)
+
+    # KRITIK SIRA:
+    # 1) kanal sayısı belirlenir ve model buna göre doğrulanır
+    # 2) ancak doğrulama geçerse eğitim başlar
+    _run_channel_preflight(MODEL_YAML, input_channels=3, imgsz=PHASE1["imgsz"])
 
     device   = "0,1" if n_gpu >= 2 else "0"
     run_dir  = RUNS_DIR / PHASE1["name"]
@@ -717,11 +747,11 @@ def train_phase1(n_gpu: int) -> str:
 # ══════════════════════════════════════════════════════════
 
 def train_phase2(phase1_weights: str, n_gpu: int) -> str:
-    """Faz 2: Faz 1 best.pt'den devam, düşük LR ile 15 epoch fine-tune."""
+    """Faz 2: Faz 1 best.pt'den devam, düşük LR ile fine-tune (varsayılan: devre dışı)."""
     from checkpoint_zipper import make_final_zip
 
     print("\n" + "="*55)
-    print("  FAZ 2 — 15 Epoch Fine-Tune (SkyWatchTrainer)")
+    print(f"  FAZ 2 — {PHASE2['epochs']} Epoch Fine-Tune (SkyWatchTrainer)")
     print(f"  Başlangıç ağırlıkları: {phase1_weights}")
     print(f"  Epoch: {PHASE2['epochs']} | LR0: {PHASE2['lr0']} | LRf: {PHASE2['lrf']}")
     print(f"  Mosaic: {PHASE2['mosaic']} (azaltılmış fine-tune modu)")
@@ -814,8 +844,10 @@ def main():
     if not args.skip_data_prep:
         prepare_data()
     else:
-        # --skip_data_prep: manuel olarak DATA_YAML bul
-        global DATA_YAML
+        # --skip_data_prep: DATA_RAW set edilmemiş olabilir — önce dataset'i bul
+        global DATA_YAML, DATA_RAW
+        if DATA_RAW is None:
+            DATA_RAW = download_dataset()
         DATA_YAML = _find_or_create_data_yaml()
         print(f"  [skip] Dataset: {DATA_YAML}")
 

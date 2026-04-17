@@ -62,7 +62,6 @@ def patch_init(ult_dir: Path):
 def patch_tasks(ult_dir: Path):
     """
     tasks.py'ye C2f_CAM ve FRM'yi parse_model'in C2f handling bloguna ekle.
-    Import ve parse_model set varligi AYRI AYRI kontrol edilir.
     """
     tasks_path = ult_dir / "nn" / "tasks.py"
     content = tasks_path.read_text(encoding="utf-8")
@@ -79,54 +78,31 @@ def patch_tasks(ult_dir: Path):
         content = "\n".join(lines)
         modified = True
         print("  Import eklendi")
-    else:
-        print("  Import zaten mevcut")
 
-    # 2) KRITIK: Ultralytics surumlerine gore parse_model modulleri
-    # base_modules/repeat_modules set'lerinde tutulabilir. Sadece "C2f," aramak yetmez.
-    # Hedef: C2f_CAM base+repeat set'e girsin, FRM ise parse_model'de ozel-case ile (c1,c2) alsin.
+    # 2) parse_model icine C2f_CAM ve FRM ozel-case ekle
+    if "elif m is C2f_CAM:" not in content:
+        # C2f blogunu bul ve C2f_CAM'i ekle
+        c2f_block = (
+            "        elif m is C2f:\n"
+            "            args.insert(0, c1)\n"
+            "        elif m is C2f_CAM:\n"
+            "            args.insert(0, c1)\n"
+        )
+        content = content.replace("        elif m is C2f:\n            args.insert(0, c1)", c2f_block)
+        modified = True
+        print("  parse_model'e C2f_CAM ozel-case eklendi")
 
-    # 2.a) base_modules set'ine C2f_CAM ekle (yoksa)
-    # Not: Import satirinda C2f_CAM gececegi icin tum dosyada aramak yanlis olur.
-    base_has = re.search(r"base_modules\s*=\s*frozenset\([\s\S]{0,2000}?C2f_CAM", content) is not None
-    if "base_modules" in content and not base_has:
-        # En guvenlisi: base_modules tanimi icinde "C2f," sonrasina ekleme denemesi
-        content, n_base = re.subn(r"(\bC2f\b\s*,)", r"\1\n            C2f_CAM,  # SKYWATCH", content, count=1)
-        if n_base:
-            modified = True
-            print("  base_modules set'ine C2f_CAM eklendi")
-
-    # 2.b) repeat_modules set'ine C2f_CAM ekle (yoksa)
-    rep_has = re.search(r"repeat_modules\s*=\s*frozenset\([\s\S]{0,2000}?C2f_CAM", content) is not None
-    if "repeat_modules" in content and not rep_has:
-        content, n_rep = re.subn(r"(\bC2f\b\s*,)", r"\1\n            C2f_CAM,  # SKYWATCH", content, count=1)
-        if n_rep:
-            modified = True
-            print("  repeat_modules set'ine C2f_CAM eklendi")
-
-    # 2.c) parse_model icine FRM ozel-case ekle (yoksa)
-    # Hedef blok: "elif m is FRM:" -> args=[c1,c2] ve c2 tracking dogru olsun.
-    if "elif m is FRM" not in content:
-        # parse_model icinde "elif m in frozenset({" bloklarindan sonra, "else:" oncesi bir yere eklemeyi dene
+    if "elif m is FRM:" not in content:
         frm_block = (
-            "\n        elif m is FRM:  # SKYWATCH: Feature Refinement Module — output channels = input channels\n"
-            "            c1 = ch[f]\n"
-            "            c2 = args[0] if args else c1  # optional explicit c2, default = c1\n"
+            "        elif m is FRM:\n"
+            "            c2 = c1\n"
             "            args = [c1, c2]\n"
         )
-        # Concat ozel-case'inden hemen sonra eklemek genelde guvenli
-        content, n_frm = re.subn(r"(elif m is Concat:\n\s+c2 = sum\(ch\[x\] for x in f\)\n)", r"\1" + frm_block, content, count=1)
+        # Concat blogundan sonra ekle
+        content, n_frm = re.subn(r"(elif m is Concat:[\s\S]{0,100}c2 = sum\(ch\[x\] for x in f\)\n)", r"\1" + frm_block, content, count=1)
         if n_frm:
             modified = True
             print("  parse_model'e FRM ozel-case eklendi")
-        else:
-            # Fallback: ilk "else:" ten once eklemeyi dene
-            content, n_frm2 = re.subn(r"(\n\s+else:\n\s+c2 = ch\[f\]\n)", frm_block + r"\1", content, count=1)
-            if n_frm2:
-                modified = True
-                print("  parse_model'e FRM ozel-case eklendi (fallback)")
-            else:
-                print("  UYARI: FRM ozel-case otomatik eklenemedi. tasks.py manuel kontrol gerekebilir.")
 
     if modified:
         tasks_path.write_text(content, encoding="utf-8")

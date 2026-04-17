@@ -22,3 +22,7 @@ Kullanıcı arayüzü (PyQt5) planlanmış ancak henüz geliştirilmemiştir. Bu
 
 🔍 Aktif Kişi Arama — Henüz Başlanmadı
 Fotoğraf yükleyerek canlı kameralarda belirli bir kişiyi arama özelliği altyapıda tanımlanmış, veritabanı şeması hazırlanmış ancak henüz aktif hale getirilmemiştir.
+
+
+Çalıştırma:
+.\venv\Scripts\python.exe src\tools\webcam_test.py --model best.pt --conf 0.35 --camera 0

@@ -49,7 +49,7 @@ backbone:
   - [-1, 2, C3k2,  [1024, True]]         # 8
   - [-1, 1, SPPF,  [1024, 5]]            # 9  — SPPF
   - [-1, 2, C2PSA, [1024]]               # 10 — P5 with attention (backbone output)
-  - [-1, 1, FRM,   [1024]]               # 11 — Feature Refinement ★ recovers blur-lost edges/textures
+  - [-1, 1, FRM,   []]                   # 11 — Feature Refinement ★ recovers blur-lost edges/textures (c2=c1 pass-through, resolved by tasks.py patch)
 
 # ──────────────────────────────────────────────
 # Head — Top-down (P5→P4→P3→P2) + Bottom-up (P2→P3→P4→P5)
