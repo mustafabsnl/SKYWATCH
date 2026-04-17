@@ -215,45 +215,31 @@ def setup():
 def _find_dataset_root() -> Path:
     """Kaggle Input'tan WIDER FACE YOLO dataset'ini bul.
 
-    Recursive arama: /kaggle/input/ altinda 4 seviye derinlige kadar
-    images/train iceren klasoru dondurur.
+    Recursive: /kaggle/input/ altinda images/train iceren klasoru dondurur.
+    Kaggle yapisi: /kaggle/input/datasets/<user>/<dataset>/<folder>/images/train
     """
-    # 1) Bilinen yapilar — hizli kontrol
-    for ds_dir in sorted(KAGGLE_INPUT.iterdir()):
-        if not ds_dir.is_dir():
-            continue
-        # /kaggle/input/<name>/skywatch_wider/images/train
-        candidate = ds_dir / "skywatch_wider"
-        if (candidate / "images" / "train").exists():
-            return candidate
-        # /kaggle/input/<name>/images/train
-        if (ds_dir / "images" / "train").exists():
-            return ds_dir
-
-    # 2) Recursive arama — Kaggle bazen ekstra klasor koyuyor
     for dirpath, dirnames, _ in os.walk(str(KAGGLE_INPUT)):
         depth = dirpath.replace(str(KAGGLE_INPUT), "").count(os.sep)
-        if depth > 4:
+        if depth > 8:
             dirnames.clear()
             continue
         p = Path(dirpath)
         if p.name == "train" and p.parent.name == "images":
-            return p.parent.parent
+            root = p.parent.parent
+            print(f"  Dataset bulundu: {root}")
+            return root
 
-    # 3) Bulunamadi — dizin yapisi yazdir (debug)
     print("\n  [HATA] Dataset bulunamadi! Dizin yapisi:")
     for dirpath, dirnames, files in os.walk(str(KAGGLE_INPUT)):
         depth = dirpath.replace(str(KAGGLE_INPUT), "").count(os.sep)
-        if depth > 4:
+        if depth > 8:
             dirnames.clear()
             continue
         indent = "  " * (depth + 1)
         print(f"  {indent}{Path(dirpath).name}/ [{len(files)} dosya, {len(dirnames)} klasor]")
 
-    available = [d.name for d in KAGGLE_INPUT.iterdir() if d.is_dir()]
     raise FileNotFoundError(
         f"Dataset bulunamadi! /kaggle/input/ altinda images/train yok.\n"
-        f"Mevcut input klasorleri: {available}\n"
         f"Kaggle notebook'a YUZLER dataset'ini Input olarak eklediginizden emin olun."
     )
 
