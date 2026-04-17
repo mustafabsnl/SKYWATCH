@@ -1,11 +1,15 @@
 """
-SKYWATCH-Det — Kaggle 2xT4 Eğitim Scripti
+SKYWATCH-Det — Kaggle 2xT4 Egitim Scripti
 ==========================================
-Tek Fazlı Eğitim — 50 EPOCH:
-  Faz 1 → 50 epoch | Normal LR, tam augmentasyon, backbone eğitimi
-  Faz 2 → Devre dışı (gerekirse sonradan --phase 2 ile fine-tune)
+Dataset : WIDER FACE (Kaggle Input: YUZLER/skywatch_wider)
+Format  : YOLO normalize (cx cy w h) — 1 sinif: face
+Istatistik: 12,880 train / 3,226 val goruntu, ~196k yuz
 
-Kullanım (Kaggle Notebook):
+Egitim:
+  Faz 1 -> backbone egitimi, tam augmentasyon
+  Faz 2 -> fine-tune (opsiyonel)
+
+Kullanim (Kaggle Notebook):
   !python train_skywatch_kaggle.py --phase 1
   !python train_skywatch_kaggle.py --phase 2
   veya tek seferde:
@@ -24,42 +28,32 @@ import argparse
 
 # ════════════════════════════════════════════════════════
 # KAGGLE YOLLARI
-# Dataset: fareselmenshawii/face-detection-dataset
+# Dataset: WIDER FACE → YOLO (Kaggle'a "YUZLER" olarak yuklendi)
 #
-#   YAPI (kagglehub ile indirildikten sonra):
-#     <path>/
+#   YAPI (Kaggle Input'tan dogrudan okunur — indirme GEREKMEZ):
+#     /kaggle/input/yuzler/skywatch_wider/
 #       images/
-#         train/   (13,386 görüntü)
-#         val/     ( 3,347 görüntü)
-#       labels/              ← YOLO normalize format (cx cy w h) ✔
-#         train/   (13,386 .txt)
-#         val/     ( 3,347 .txt)
-#       labels2/             ← WIDER ham format — KULLANILMIYOR
+#         train/   (12,880 goruntu)
+#         val/     ( 3,226 goruntu)
+#       labels/
+#         train/   (12,880 .txt — YOLO: 0 cx cy w h)
+#         val/     ( 3,226 .txt)
+#       data.yaml
 #
-#   Format: YOLO detection (class cx cy w h) — dönüşüm GEREKSİZ
 #   nc: 1 | class_id: 0 | sinif: face
-#
-#   Yüz büyüklük dağılımı (analiz sonucundan):
-#     tiny  (<5%) : %44.9  → P2 head KRİTİK
-#     small (5-15%): %40.2  → SkyWatchBboxLoss small_w=2.0 DOGRULANMIS
-#     TOPLAM %85.1 küçük yüz → mosaic=1.0 ŞART
+#   Toplam: 196,106 yuz (ort. 12.2 yuz/resim, max 1962)
 # ════════════════════════════════════════════════════════
 
 WORKING        = Path("/kaggle/working")
 REPO_DIR       = WORKING / "SKYWATCH"
-# DATA_RAW: setup() → download_dataset() tarafından kagglehub ile belirlenir
-DATA_RAW       = None
-# Kaggle dataset slug: fareselmenshawii/face-detection-dataset
-# Yapı: images/train+val, labels/train+val (YOLO format)
-DATASET_SLUG   = "fareselmenshawii/face-detection-dataset"
+KAGGLE_INPUT   = Path("/kaggle/input")
 RUNS_DIR       = WORKING / "runs"
 CHECKPOINT_DIR = WORKING / "checkpoints"
 GITHUB_REPO    = "https://github.com/mustafabsnl/SKYWATCH.git"
 
 # SKYWATCH-Det: 4-scale detection head (P2/P3/P4/P5) + C2f_CAM + FRM
-# Pose head KULLANILMIYOR — dataset'te landmark yok
 MODEL_YAML     = "skywatch-det.yaml"
-DATA_YAML      = None   # prepare_data() tarafından belirlenir
+DATA_YAML      = None   # prepare_data() tarafindan belirlenir
 
 # Her kaç epoch'ta snapshot alinsin (klasor yapisi: snapshot_epoch_N/)
 CHECKPOINT_EVERY_N = 5  # 50 epoch için 5'te bir (epoch 5, 10, 15, ..., 50)
@@ -214,190 +208,68 @@ def setup():
 
 # ══════════════════════════════════════════════════════════
 # VERİ SETİ HAZIRLIĞI
-# Dataset zaten YOLO formatında — dönüşüm gerekmez
-# kagglehub ile otomatik indirilir
+# Dataset Kaggle'a Input olarak eklendi — indirme GEREKMEZ
+# Kaggle Input: /kaggle/input/yuzler/skywatch_wider/
 # ══════════════════════════════════════════════════════════
 
-def download_dataset() -> Path:
-    """kagglehub ile dataset'i indir, gerçek path'i döndür.
+def _find_dataset_root() -> Path:
+    """Kaggle Input'tan WIDER FACE YOLO dataset'ini bul.
 
-    Not: Kaggle ortamında internet açık olmalıdır.
-    Dataset zaten cache'deyse yeniden indirilmez.
+    Arama sirasi:
+      1. /kaggle/input/*/skywatch_wider/images/train
+      2. /kaggle/input/*/images/train
     """
-    global DATA_RAW
-    try:
-        import kagglehub
-    except ImportError:
-        subprocess.run([sys.executable, "-m", "pip", "install", "kagglehub", "-q"], check=True)
-        import kagglehub
+    for ds_dir in sorted(KAGGLE_INPUT.iterdir()):
+        if not ds_dir.is_dir():
+            continue
+        candidate = ds_dir / "skywatch_wider"
+        if (candidate / "images" / "train").exists():
+            return candidate
+        if (ds_dir / "images" / "train").exists():
+            return ds_dir
 
-    print(f"  Dataset indiriliyor: {DATASET_SLUG}")
-    print("  (Cache'de varsa aninda hazir olur)")
-    raw_path = kagglehub.dataset_download(DATASET_SLUG)
-    DATA_RAW = Path(raw_path)
-    print(f"  Dataset path: {DATA_RAW}")
-    return DATA_RAW
+    available = [d.name for d in KAGGLE_INPUT.iterdir() if d.is_dir()]
+    raise FileNotFoundError(
+        f"Dataset bulunamadi! /kaggle/input/ altinda images/train yok.\n"
+        f"Mevcut input klasorleri: {available}\n"
+        f"Kaggle notebook'a YUZLER dataset'ini Input olarak eklediginizden emin olun."
+    )
 
 
 def prepare_data():
-    """kagglehub ile dataset'i indir, DATA_YAML global'ini ayarla.
-
-    Train/Val zaten ayrılmış — split gerekmez.
-    """
+    """Kaggle Input'tan dataset'i bul, DATA_YAML olustur."""
     global DATA_YAML
 
-    # 1. Dataset'i indir (veya cache'den yukle)
-    download_dataset()
+    dataset_root = _find_dataset_root()
 
     print("\n" + "="*55)
     print("  VERI SETI KONTROLU")
     print("="*55)
-    print(f"  Kaynak: {DATA_RAW}")
+    print(f"  Kaynak: {dataset_root}")
 
-    # 2. data.yaml bul veya olustur
-    DATA_YAML = _find_or_create_data_yaml()
-    print(f"  data.yaml: {DATA_YAML}")
-
-    # Istatistik
-    for split in ("train", "val", "validation"):  # her ikisini dene
-        img_dir = DATA_YAML.parent / "images" / split
+    for split in ("train", "val"):
+        img_dir = dataset_root / "images" / split
         if img_dir.exists():
-            imgs = list(img_dir.glob("*.jpg")) + list(img_dir.glob("*.jpeg")) + list(img_dir.glob("*.png"))
-            label = "val" if split != "train" else "train"
-            print(f"  {label:5s}: {len(imgs):,} goruntu")
+            n = sum(1 for _ in img_dir.iterdir())
+            print(f"  {split:5s}: {n:,} goruntu")
 
-
-def _find_or_create_data_yaml() -> Path:
-    """Dataset'e ait data.yaml'i her zaman tazenden olustur.
-
-    KRITIK: Eski session'dan kalan /kaggle/working/skywatch_data/data.yaml
-    farkli bir dataset'e ait olabilir. Bunu kullanma.
-    Her zaman DATA_RAW'i baz alarak taze olustur.
-
-    fareselmenshawii/face-detection-dataset yapisi:
-      <path>/
-        images/train/  [13,386 goruntu]
-        images/val/    [ 3,347 goruntu]
-        labels/train/  [YOLO normalize: cls cx cy w h]
-        labels/val/    [YOLO normalize: cls cx cy w h]
-        labels2/       [WIDER ham format - KULLANILMIYOR]
-    """
-    img_root = _find_images_train_root()
-
-    # val klasoru: 'validation' mi 'val' mi?
-    if (img_root / "images" / "validation").exists():
-        val_dir = "images/validation"
-    elif (img_root / "images" / "val").exists():
-        val_dir = "images/val"
-    else:
-        val_dir = "images/val"  # fallback
-
-    # Her zaman taze data.yaml olustur (eski session'dan kalan varsa uzerine yaz)
     yaml_path = WORKING / "skywatch_data" / "data.yaml"
     yaml_path.parent.mkdir(parents=True, exist_ok=True)
     yaml_content = (
-        f"# SKYWATCH-Det — iamtushara/face-detection-dataset\n"
-        f"# Otomatik olusturuldu: {DATA_RAW}\n"
-        f"path: {str(img_root).replace(chr(92), '/')}\n"
+        f"# SKYWATCH-Det — WIDER FACE YOLO\n"
+        f"path: {str(dataset_root).replace(chr(92), '/')}\n"
         f"train: images/train\n"
-        f"val: {val_dir}\n\n"
+        f"val: images/val\n\n"
         f"nc: 1\n"
         f"names: ['face']\n"
     )
     yaml_path.write_text(yaml_content, encoding="utf-8")
-    print(f"  data.yaml olusturuldu: {yaml_path}")
-    print(f"    path : {img_root}")
+    print(f"  data.yaml: {yaml_path}")
+    print(f"    path : {dataset_root}")
     print(f"    train: images/train")
-    print(f"    val  : {val_dir}")
-    return yaml_path
+    print(f"    val  : images/val")
 
-
-
-def _fix_data_yaml_paths(yaml_path: Path) -> Path:
-    """data.yaml icindeki relative path'leri mutlak yola cevir.
-
-    Ornek: train: ../dataset/images/train  ->  path: /abs/path, train: images/train
-    """
-    import yaml as _yaml
-
-    try:
-        with open(yaml_path, encoding="utf-8") as f:
-            d = _yaml.safe_load(f)
-    except Exception:
-        return yaml_path  # okunamadiysa oldugu gibi kullan
-
-    # Zaten 'path' anahtari varsa ultralytics bunu halleder
-    if "path" in d:
-        return yaml_path
-
-    # path yoksa: train/val degerlerinden root'u cikart
-    train_val = d.get("train", "images/train")
-    # Relative ise abs'e cevir
-    if "images/train" in str(train_val):
-        img_root = yaml_path.parent
-        fixed_yaml = WORKING / "skywatch_data" / "data.yaml"
-        fixed_yaml.parent.mkdir(parents=True, exist_ok=True)
-        fixed_content = (
-            f"path: {str(img_root).replace(chr(92), '/')}\n"
-            f"train: images/train\n"
-            f"val: images/val\n\n"
-            f"nc: {d.get('nc', 1)}\n"
-            f"names: {d.get('names', ['face'])}\n"
-        )
-        fixed_yaml.write_text(fixed_content, encoding="utf-8")
-        print(f"  Path duzeltildi: {fixed_yaml}")
-        return fixed_yaml
-
-    return yaml_path
-
-
-def _find_images_train_root() -> Path:
-    """images/train klasorunu iceren root dizini dondur (recursive).
-
-    fareselmenshawii/face-detection-dataset yapisi:
-      <DATA_RAW>/images/train/      ← dogrudan root'ta
-      <DATA_RAW>/images/val/
-      <DATA_RAW>/labels/train/      ← YOLO normalize format
-      <DATA_RAW>/labels/val/
-
-    Fallback olarak alt dizinleri de tarar.
-    """
-    known: list[Path | None] = [
-        DATA_RAW,
-        DATA_RAW / "dataset" if DATA_RAW else None,
-        DATA_RAW / "merged" if DATA_RAW else None,
-        WORKING / "skywatch_data",
-    ]
-    for root in known:
-        if root and (root / "images" / "train").exists():
-            print(f"  images/train bulundu: {root}")
-            return root
-
-    if DATA_RAW is None:
-        raise FileNotFoundError(
-            "DATA_RAW ayarlanmamış! --skip_data_prep kullanıyorsanız "
-            "önce download_dataset() çağrılmış olmalı veya DATA_RAW "
-            "ortam değişkeni/argüman olarak verilmelidir."
-        )
-
-    for dirpath, dirnames, _ in os.walk(str(DATA_RAW)):
-        depth = str(dirpath).replace(str(DATA_RAW), "").count(os.sep)
-        if depth > 3:
-            dirnames.clear()
-            continue
-        if "images" in dirnames and (Path(dirpath) / "images" / "train").exists():
-            return Path(dirpath)
-
-    print(f"\n  Dizin yapisi ({DATA_RAW}):")
-    for dirpath, dirnames, files in os.walk(str(DATA_RAW)):
-        depth = str(dirpath).replace(str(DATA_RAW), "").count(os.sep)
-        if depth > 3:
-            dirnames.clear()
-            continue
-        print(f"  {'  '*depth}{Path(dirpath).name}/ [{len(files)} dosya]")
-    raise FileNotFoundError(
-        f"images/train dizini bulunamadi! kagglehub path: {DATA_RAW}"
-    )
+    DATA_YAML = yaml_path
 
 
 # ══════════════════════════════════════════════════════════
@@ -842,26 +714,13 @@ def main():
         default="",
         help="Faz 2 için kullanılacak Faz 1 ağırlık dosyası (--phase 2 ise zorunlu)"
     )
-    parser.add_argument(
-        "--skip_data_prep",
-        action="store_true",
-        help="Veri dönüşümünü atla (zaten yapıldıysa)"
-    )
     args = parser.parse_args()
 
     # Kurulum
     n_gpu = setup()
 
-    # Veri hazırlama — DATA_YAML global'ini belirle
-    if not args.skip_data_prep:
-        prepare_data()
-    else:
-        # --skip_data_prep: DATA_RAW set edilmemiş olabilir — önce dataset'i bul
-        global DATA_YAML, DATA_RAW
-        if DATA_RAW is None:
-            DATA_RAW = download_dataset()
-        DATA_YAML = _find_or_create_data_yaml()
-        print(f"  [skip] Dataset: {DATA_YAML}")
+    # Veri hazirla — Kaggle Input'tan oku, DATA_YAML olustur
+    prepare_data()
 
     # Eğitim
     if args.phase == "1":
