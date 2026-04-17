@@ -61,13 +61,20 @@ def patch_init(ult_dir: Path):
 
 def patch_tasks(ult_dir: Path):
     """
-    tasks.py'ye C2f_CAM ve FRM'yi parse_model'in C2f handling bloguna ekle.
+    tasks.py'ye C2f_CAM ve FRM'yi parse_model'e ekle.
+
+    Yapılanlar:
+      1) Import satırı ekle
+      2) C2f_CAM'i base_modules frozenset'ine ekle   (c1, c2 = ch[f], args[0])
+      3) C2f_CAM'i repeat_modules frozenset'ine ekle  (repeat desteği)
+      4) C2f_CAM elif — args.insert(0, c1)            (C2f ile aynı)
+      5) FRM elif — c1 = ch[f]; c2 = c1; args = [c1, c2]
     """
     tasks_path = ult_dir / "nn" / "tasks.py"
     content = tasks_path.read_text(encoding="utf-8")
     modified = False
 
-    # 1) Import ekle
+    # ── 1) Import ──
     inject_import = "from ultralytics.nn.modules.skywatch_modules import C2f_CAM, FRM"
     if inject_import not in content:
         lines = content.split("\n")
@@ -79,34 +86,75 @@ def patch_tasks(ult_dir: Path):
         modified = True
         print("  Import eklendi")
 
-    # 2) parse_model icine C2f_CAM ve FRM ozel-case ekle
-    if "elif m is C2f_CAM:" not in content:
-        # C2f blogunu bul ve C2f_CAM'i ekle
-        c2f_block = (
-            "        elif m is C2f:\n"
-            "            args.insert(0, c1)\n"
-            "        elif m is C2f_CAM:\n"
-            "            args.insert(0, c1)\n"
+    # ── 2) C2f_CAM'i base_modules frozenset'ine ekle ──
+    bm = re.search(r'base_modules\s*=\s*frozenset\(\s*\{.*?\}\s*\)', content, re.DOTALL)
+    if bm and "C2f_CAM" not in bm.group(0):
+        content, n = re.subn(
+            r'(base_modules\s*=\s*frozenset\(\s*\{.*?)(\s*\}\s*\))',
+            r'\g<1>\n            C2f_CAM,\g<2>',
+            content, count=1, flags=re.DOTALL,
         )
-        content = content.replace("        elif m is C2f:\n            args.insert(0, c1)", c2f_block)
-        modified = True
-        print("  parse_model'e C2f_CAM ozel-case eklendi")
+        if n:
+            modified = True
+            print("  C2f_CAM base_modules'a eklendi")
 
-    if "elif m is FRM:" not in content:
-        frm_block = (
-            "        elif m is FRM:\n"
-            "            c2 = c1\n"
-            "            args = [c1, c2]\n"
+    # ── 3) C2f_CAM'i repeat_modules frozenset'ine ekle ──
+    rm = re.search(r'repeat_modules\s*=\s*frozenset\(\s*\{.*?\}\s*\)', content, re.DOTALL)
+    if rm and "C2f_CAM" not in rm.group(0):
+        content, n = re.subn(
+            r'(repeat_modules\s*=\s*frozenset\(\s*\{.*?)(\s*\}\s*\))',
+            r'\g<1>\n            C2f_CAM,\g<2>',
+            content, count=1, flags=re.DOTALL,
         )
-        # Concat blogundan sonra ekle
-        content, n_frm = re.subn(r"(elif m is Concat:[\s\S]{0,100}c2 = sum\(ch\[x\] for x in f\)\n)", r"\1" + frm_block, content, count=1)
+        if n:
+            modified = True
+            print("  C2f_CAM repeat_modules'a eklendi")
+
+    # ── 4) C2f_CAM args.insert(0, c1) elif ──
+    if "elif m is C2f_CAM:" not in content:
+        old_c2f = "        elif m is C2f:\n            args.insert(0, c1)"
+        if old_c2f in content:
+            c2f_block = (
+                "        elif m is C2f:\n"
+                "            args.insert(0, c1)\n"
+                "        elif m is C2f_CAM:\n"
+                "            args.insert(0, c1)"
+            )
+            content = content.replace(old_c2f, c2f_block)
+            modified = True
+            print("  parse_model'e C2f_CAM elif eklendi")
+
+    # ── 5) FRM elif (c1 = ch[f] ile) ──
+    old_frm_wrong = (
+        "        elif m is FRM:\n"
+        "            c2 = c1\n"
+        "            args = [c1, c2]\n"
+    )
+    frm_correct = (
+        "        elif m is FRM:\n"
+        "            c1 = ch[f]\n"
+        "            c2 = c1\n"
+        "            args = [c1, c2]\n"
+    )
+    if old_frm_wrong in content:
+        content = content.replace(old_frm_wrong, frm_correct)
+        modified = True
+        print("  FRM elif duzeltildi (c1 = ch[f] eklendi)")
+    elif "elif m is FRM:" not in content:
+        content, n_frm = re.subn(
+            r"(elif m is Concat:[\s\S]{0,100}c2 = sum\(ch\[x\] for x in f\)\n)",
+            r"\1" + frm_correct,
+            content, count=1,
+        )
         if n_frm:
             modified = True
-            print("  parse_model'e FRM ozel-case eklendi")
+            print("  parse_model'e FRM elif eklendi")
 
     if modified:
         tasks_path.write_text(content, encoding="utf-8")
         print("  OK: tasks.py guncellendi")
+    else:
+        print("  tasks.py zaten guncel.")
 
 
 def copy_yaml(ult_dir: Path):
