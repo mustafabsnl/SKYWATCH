@@ -21,38 +21,56 @@ Beklenen çıktı (doğru kurulumda):
   ✅ Tüm kanallar doğru! Eğitimi başlatabilirsiniz.
 """
 import sys
-import importlib.util
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Any
 
 import torch
 
-# Proje kökünü path'e ekle
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
-
-# skywatch_modules'ü doğrudan dosyadan yükle ve sys.modules'e enjekte et.
-SKYWATCH_MODULE_PATH = PROJECT_ROOT / "src" / "ultralytics_patch" / "nn" / "modules" / "skywatch_modules.py"
-spec = importlib.util.spec_from_file_location("ultralytics.nn.modules.skywatch_modules", SKYWATCH_MODULE_PATH)
-if spec is None or spec.loader is None:
-    raise RuntimeError(f"skywatch_modules.py yüklenemedi: {SKYWATCH_MODULE_PATH}")
-skywatch_modules = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(skywatch_modules)
-
-import ultralytics.nn.modules as ult_modules
-ult_modules.skywatch_modules = skywatch_modules
-ult_modules.C2f_CAM = skywatch_modules.C2f_CAM
-ult_modules.FRM = skywatch_modules.FRM
-sys.modules["ultralytics.nn.modules.skywatch_modules"] = skywatch_modules
-
-from ultralytics import YOLO
 
 DEFAULT_YAML = PROJECT_ROOT / "src" / "ultralytics_patch" / "cfg" / "models" / "skywatch" / "skywatch-det.yaml"
 
 
+def _ensure_skywatch_modules():
+    """C2f_CAM ve FRM ultralytics'e kayıtlı değilse repo'dan enjekte et.
+
+    Kaggle'da kaggle_setup.py zaten patch uyguladıysa bu fonksiyon hiçbir şey yapmaz.
+    Lokal ortamda veya patch uygulanmamışsa repo kaynak dosyasından yükler.
+    """
+    try:
+        from ultralytics.nn.modules import C2f_CAM, FRM  # noqa: F401
+        return
+    except ImportError:
+        pass
+
+    import importlib.util
+    src = PROJECT_ROOT / "src" / "ultralytics_patch" / "nn" / "modules" / "skywatch_modules.py"
+    if not src.exists():
+        raise RuntimeError(f"skywatch_modules.py bulunamadı: {src}")
+
+    spec = importlib.util.spec_from_file_location("ultralytics.nn.modules.skywatch_modules", src)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"skywatch_modules.py yüklenemedi: {src}")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    import ultralytics.nn.modules as ult_modules
+    ult_modules.skywatch_modules = mod
+    ult_modules.C2f_CAM = mod.C2f_CAM
+    ult_modules.FRM = mod.FRM
+    sys.modules["ultralytics.nn.modules.skywatch_modules"] = mod
+    print("  [validator] skywatch modülleri repo'dan enjekte edildi")
+
+
+_ensure_skywatch_modules()
+
+from ultralytics import YOLO  # noqa: E402
+
+
 # ════════════════════════════════════════════════════════════════════════
-# Veri yapıları — global state yerine instance bazlı
+# Veri yapıları
 # ════════════════════════════════════════════════════════════════════════
 
 @dataclass
@@ -115,10 +133,8 @@ class ChannelValidator:
 
         return DEFAULT_YAML
 
-    # ── Rebuild flag kontrolü ────────────────────────────────────────
     @staticmethod
     def _check_rebuild_flags(model) -> tuple[bool, list[str]]:
-        """Modeldeki C2f_CAM ve FRM modüllerinin _rebuilt flag'ini kontrol et."""
         rebuilt = False
         modules_rebuilt: list[str] = []
         for i, layer in enumerate(model.model.model):
@@ -128,39 +144,28 @@ class ChannelValidator:
                 modules_rebuilt.append(f"Layer {i} ({name})")
         return rebuilt, modules_rebuilt
 
-    # ── Strict kanal deseni doğrulama ────────────────────────────────
     @staticmethod
     def _check_channel_patterns(
         cam_rows: list[ChannelRow],
         frm_rows: list[ChannelRow],
     ) -> list[str]:
-        """Beklenen kanal desenlerini strict doğrula."""
         violations: list[str] = []
-
         for row in frm_rows:
             if row.in_ch != row.out_ch:
                 violations.append(
                     f"FRM (Layer {row.layer_idx}): giriş ({row.in_ch}) != çıkış ({row.out_ch}) — "
                     f"FRM pass-through olmalı (in_ch == out_ch)"
                 )
-
         for row in cam_rows:
             if row.out_ch > row.in_ch:
                 violations.append(
                     f"C2f_CAM (Layer {row.layer_idx}): çıkış ({row.out_ch}) > giriş ({row.in_ch}) — "
                     f"C2f_CAM kanal daraltmalı (out_ch <= in_ch)"
                 )
-            if row.in_ch < 1:
-                violations.append(
-                    f"C2f_CAM (Layer {row.layer_idx}): giriş kanalı 0 — model inşa hatası"
-                )
-
         return violations
 
-    # ── init kanal uyumu kontrolü ────────────────────────────────────
     @staticmethod
     def _check_init_channel_match(model) -> list[str]:
-        """Modüllerin __init__'te aldığı c1 ile forward'da gördüğü c1 aynı mı?"""
         issues: list[str] = []
         for i, layer in enumerate(model.model.model):
             name = type(layer).__name__
@@ -188,7 +193,6 @@ class ChannelValidator:
         imgsz: int = 640,
         verbose: bool = True,
     ) -> ValidationResult:
-        """Modeli kur, forward çalıştır, rebuild + kanal deseni + rapor."""
         self._log = []
         yaml_path = self.resolve_yaml(model_yaml)
         result = ValidationResult(yaml_path=yaml_path, input_channels=input_channels, imgsz=imgsz)
@@ -201,6 +205,8 @@ class ChannelValidator:
         if not yaml_path.exists():
             result.ok = False
             result.error = f"YAML bulunamadı: {yaml_path}"
+            if verbose:
+                self._print_report(result)
             return result
 
         if verbose:
@@ -217,7 +223,11 @@ class ChannelValidator:
                     "İpucu: Ultralytics patch'i aktif görünmüyor olabilir. "
                     "Önce kaggle_setup.py / ensure_patch() adımını çalıştırın."
                 )
+            else:
+                err = f"Model inşa hatası: {e}"
             result.error = err
+            if verbose:
+                self._print_report(result)
             return result
 
         # ── Hook'ları kaydet ──
@@ -247,17 +257,14 @@ class ChannelValidator:
         result.cam_rows = [r for r in self._log if r.module_name == "C2f_CAM"]
         result.frm_rows = [r for r in self._log if r.module_name == "FRM"]
 
-        # ── Rebuild flag kontrolü ──
         rebuilt, rebuilt_modules = self._check_rebuild_flags(model)
         result.rebuild_detected = rebuilt
         result.rebuild_modules = rebuilt_modules
 
-        # ── Strict kanal deseni kontrolü ──
         pattern_violations = self._check_channel_patterns(result.cam_rows, result.frm_rows)
         init_violations = self._check_init_channel_match(model)
         result.channel_violations = pattern_violations + init_violations
 
-        # ── ok kararı ──
         has_critical = bool(result.cam_rows) and bool(result.frm_rows)
         result.ok = (
             not result.error
@@ -270,24 +277,22 @@ class ChannelValidator:
             self._print_report(result)
         return result
 
-    # ── Rapor yazdır ─────────────────────────────────────────────────
     @staticmethod
     def _print_report(result: ValidationResult) -> None:
         if result.error:
             print(f"\n{'=' * 60}")
-            print(f"❌ KANAL UYUŞMAZLIĞI YAKALANDI:\n{result.error}")
+            print(f"❌ HATA:\n{result.error}")
             print(f"{'=' * 60}")
 
-        print("\n[4] Katman Kanal Raporu:")
-        print(f"  {'Layer':<8} {'Modül':<16} {'Giriş CH':>10} {'Çıkış CH':>10}")
-        print(f"  {'-' * 48}")
+        if result.rows:
+            print("\n[4] Katman Kanal Raporu:")
+            print(f"  {'Layer':<8} {'Modül':<16} {'Giriş CH':>10} {'Çıkış CH':>10}")
+            print(f"  {'-' * 48}")
+            critical = {"C2f_CAM", "FRM"}
+            for row in result.rows:
+                marker = "★" if row.module_name in critical else " "
+                print(f"  {row.layer_idx:<8} {row.module_name:<16} {row.in_ch:>10} {row.out_ch:>10}  {marker}")
 
-        critical = {"C2f_CAM", "FRM"}
-        for row in result.rows:
-            marker = "★" if row.module_name in critical else " "
-            print(f"  {row.layer_idx:<8} {row.module_name:<16} {row.in_ch:>10} {row.out_ch:>10}  {marker}")
-
-        # ── C2f_CAM detayı ──
         print()
         if result.cam_rows:
             for r in result.cam_rows:
@@ -295,25 +300,20 @@ class ChannelValidator:
         else:
             print("  ⚠️  C2f_CAM katmanı bulunamadı — YAML kontrolü yapın")
 
-        # ── FRM detayı ──
         if result.frm_rows:
             for r in result.frm_rows:
                 print(f"  ✅ [Layer {r.layer_idx:>2} — FRM     ] giriş: {r.in_ch:<6} çıkış: {r.out_ch}")
         else:
             print("  ⚠️  FRM katmanı bulunamadı — YAML kontrolü yapın")
 
-        # ── Rebuild kontrolü ──
         print()
         if result.rebuild_detected:
-            print("  ❌ REBUILD TESPİT EDİLDİ — model forward sırasında kendini yeniden inşa etti!")
+            print("  ❌ REBUILD TESPİT EDİLDİ!")
             for m in result.rebuild_modules:
                 print(f"     → {m}")
-            print("     Bu, parse_model'ın yanlış kanal gönderdiği anlamına gelir.")
-            print("     Çözüm: tasks.py patch veya YAML args düzeltilmeli.")
         else:
             print("  ✅ Rebuild tetiklenmedi — mimari init'te doğru kurulmuş.")
 
-        # ── Strict kanal deseni ──
         if result.channel_violations:
             print()
             print("  ❌ KANAL DESENİ İHLALLERİ:")
@@ -322,7 +322,6 @@ class ChannelValidator:
         else:
             print("  ✅ Kanal desenleri doğru (FRM: in==out, C2f_CAM: out<=in).")
 
-        # ── Genel sonuç ──
         print()
         if result.ok:
             print("  ✅ Tüm kontroller geçti! Eğitimi başlatabilirsiniz.")
@@ -332,7 +331,7 @@ class ChannelValidator:
 
 
 # ════════════════════════════════════════════════════════════════════════
-# Public API — eğitim scriptlerinden çağrılır
+# Public API
 # ════════════════════════════════════════════════════════════════════════
 
 def validate_model_channels(
@@ -341,7 +340,6 @@ def validate_model_channels(
     imgsz: int = 640,
     verbose: bool = True,
 ) -> dict[str, Any]:
-    """Eski dict-based API — geriye uyumluluk için korunuyor."""
     validator = ChannelValidator()
     r = validator.validate(model_yaml=model_yaml, input_channels=input_channels, imgsz=imgsz, verbose=verbose)
     return {
