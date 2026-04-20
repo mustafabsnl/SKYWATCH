@@ -111,43 +111,59 @@ PHASE1 = dict(
 )
 
 # ══════════════════════════════════════════════════════════
-# FAZ 2 — DEVRE DIŞI
-# Faz 1 zaten 50 epoch tam eğitim yaptı, fine-tune gerekmez.
-# İstersen sonradan: python train_skywatch_kaggle.py --phase 2
+# FAZ 2 - FINE-TUNE (best.pt uzerinden, 30 epoch)
+# ══════════════════════════════════════════════════════════
+# Neden box_loss/dfl_loss Faz 1de yuksek kaldi?
+#   1. SkyWatchBboxLoss kucuk yuzlere 3x agirlik -> sayi yapay sisiyor
+#   2. DFL + P2(stride=4) 20px yuz icin inherent zor
+#   3. Mosaic kapaninca (ep36) son 15 epoch yeniden converge etti
+#
+# Faz 2 hedefleri:
+#   box_loss: ~1.63 -> ~1.35 | dfl_loss: ~1.57 -> ~1.30 | mAP50: ~0.70 -> ~0.74+
+#
+# Strateji:
+#   - Warm restart: dusuk lr0=0.0003, cos_lr=True
+#   - box weight: 8.5 -> 11.0  (kucuk yuz lokalizasyon vurgusu)
+#   - dfl weight: 2.0 ->  1.5  (P2 DFL cezasi yumusatildi)
+#   - mosaic=0.0               (fine-tune icin temiz bbox siniri)
+#   - FaceOcclusionAug korunuyor (SkyWatchTrainer uzerinden)
 # ══════════════════════════════════════════════════════════
 PHASE2 = dict(
-    epochs          = 0,           # DEVRE DIŞI — Faz 1 zaten 50 epoch tam eğitim
+    epochs          = 30,          # Faz 1 best.pt uzerinden 30 epoch ince ayar
     imgsz           = 640,
-    batch           = 8,
-    nbs             = 64,
-    lr0             = 0.0002,      # Faz 1'in ~1/5'i — ince ayar için düşük LR
-    lrf             = 0.01,        # Final LR = lr0 * lrf = 0.000002
+    batch           = 4,           # Fine-tune: kucuk batch -> daha stabil gradient
+    nbs             = 64,          # efektif batch sabit: 4 * (64/4) = 64
+    lr0             = 0.0003,      # Warm restart LR (Faz 1 lr0'in 1/3u)
+    lrf             = 0.01,        # Final LR = 0.0003 * 0.01 = 0.000003
+    cos_lr          = True,        # Cosine LR schedule - fine-tune icin kritik
     momentum        = 0.937,
     weight_decay    = 0.0005,
-    warmup_epochs   = 1,           # Kısa warmup (fine-tune)
+    warmup_epochs   = 2,           # Kisa warmup (2/30 ~ %7)
     warmup_momentum = 0.8,
     warmup_bias_lr  = 0.01,
     optimizer       = "AdamW",
-    patience        = 10,          # 15 epoch'ta erken durdurma eşiği
+    patience        = 15,
     save_period     = 5,
-    # Azaltılmış augmentasyon — fine-tune aşamasında stabilite öncelikli
-    mosaic          = 0.3,
-    copy_paste      = 0.0,
+    # Augmentation - Mosaic KAPALI (fine-tune box regresyon stabilitesi)
+    # FaceOcclusionAug SkyWatchTrainer uzerinden aktif kalmaya devam eder.
+    mosaic          = 0.0,         # Mosaic kapat: bbox kenari icin temiz imaj
+    copy_paste      = 0.05,        # Hafif copy-paste korunuyor
     copy_paste_mode = "flip",
-    mixup           = 0.0,
-    degrees         = 5.0,
+    mixup           = 0.0,         # Mixup kapat: DFL ogrenimi icin gurultu yaratmaz
+    degrees         = 8.0,
     fliplr          = 0.5,
-    perspective     = 0.0,
+    perspective     = 0.0003,
     hsv_h           = 0.01,
-    hsv_s           = 0.4,
+    hsv_s           = 0.5,
     hsv_v           = 0.3,
-    erasing         = 0.0,
+    erasing         = 0.0,         # Erasing kapat: DFL icin temiz bbox kenari
     multi_scale     = False,
-    close_mosaic    = 12,          # Neredeyse tüm fine-tune boyunca mosaic kapalı
-    # Loss — Faz 1 ile tutarlı
-    box             = 8.5,
+    close_mosaic    = 30,          # mosaic=0.0 zaten kapali - dummy param
+    # box 8.5 -> 11.0: Kucuk yuz lokalizasyonunu zorla -> box_loss dusurur
+    # dfl 2.0 ->  1.5: P2/DFL cezasini yumusat -> dfl_loss dusurur
+    box             = 11.0,
     cls             = 0.5,
-    dfl             = 2.0,
+    dfl             = 1.5,
     name            = "skywatch_det_phase2",
     exist_ok        = True,
     plots           = True,
