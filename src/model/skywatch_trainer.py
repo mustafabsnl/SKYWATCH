@@ -161,68 +161,98 @@ class SkyWatchTrainer(DetectionTrainer):
         return SkyWatchDetectionLoss(self.model)
 
     def build_dataset(self, img_path, mode="train", batch=None):
-        """train modunda FaceOcclusionAug ekle."""
+        """train modunda FaceOcclusionAug ekle — val'a ASLA uygulanmaz."""
         dataset = super().build_dataset(img_path, mode, batch)
-        if mode == "train":
-            # Fix #7: Augment pozisyonunu logla ve doğrula.
-            # Fix #5: transforms listesi bulunamazsa RuntimeError — sessiz devam YOK.
-            # Oklüzyon augmentasyonu tez katkısı; devreye girmeden eğitim anlamsız.
-            try:
-                occ_aug = FaceOcclusionAug(
-                    occlusion_prob=0.35,
-                    blur_prob=0.25,
-                    downscale_prob=0.20,
-                )
-                if hasattr(dataset, "transforms") and dataset.transforms is not None:
-                    if hasattr(dataset.transforms, "transforms"):
-                        chain = dataset.transforms.transforms
-                        insert_pos = max(len(chain) - 1, 0)  # son elemandan önce
-                        chain.insert(insert_pos, occ_aug)
 
-                        actual_pos = chain.index(occ_aug)
-                        total = len(chain)
-                        print(f"[SKYWATCH] FaceOcclusionAug eklendi: pozisyon {actual_pos}/{total - 1}")
+        # ── Çift Güvenlik Katmanı (Fix: val aug sorunu) ──────────────────────
+        # Sorun: Ultralytics DDP modunda rank-0 bazen val path'ini de
+        #        mode="train" ile çağırabiliyor (cache oluşturma aşaması).
+        #        Sadece mode=="train" kontrolü YETERSİZ.
+        #
+        # Çözüm: HEM mode hem de img_path kontrol edilir.
+        #   → mode != "train"  : kesinlikle val → aug ekleme
+        #   → "val" in img_path: path val → aug ekleme (DDP cache senaryosu)
+        # ─────────────────────────────────────────────────────────────────────
+        path_str = str(img_path).replace("\\", "/").lower()
+        is_train_mode = (mode == "train")
+        is_train_path = "train" in path_str and "val" not in path_str
 
-                        # Son sıradaysa muhtemelen normalize'dan SONRA — uyarı ver.
-                        if actual_pos == total - 1:
-                            import warnings
-                            warnings.warn(
-                                "[SkyWatchTrainer] FaceOcclusionAug transform zincirinin EN SONUNA eklendi!\n"
-                                "Bu, normalize'dan SONRA çalışabilir ve aug'ı etkisiz kılar.\n"
-                                "Ultralytics pipeline değişmiş olabilir; transform sırasını kontrol edin.",
-                                RuntimeWarning,
-                                stacklevel=2,
-                            )
-                        else:
-                            prev_t = type(chain[actual_pos - 1]).__name__ if actual_pos > 0 else "<baş>"
-                            next_t = type(chain[actual_pos + 1]).__name__ if actual_pos < total - 1 else "<son>"
-                            print(f"[SKYWATCH]   önce: {prev_t}  →  FaceOcclusionAug  →  sonra: {next_t}")
-                    else:
-                        # Fix #5: transforms.transforms yok → API değişti → EĞİTİMİ DURDUR.
-                        raise RuntimeError(
-                            "[SkyWatchTrainer] dataset.transforms.transforms listesi bulunamadı!\n"
-                            "FaceOcclusionAug (Tez Katkı #3) devreye giremedi.\n"
-                            "Ultralytics'in iç augmentation API'si değişmiş olabilir.\n"
-                            "transform zinciri yapısını kontrol edin ve bu bloğu güncelle."
-                        )
-                else:
-                    # Fix #5: transforms hiç yok → ciddi API sorunu → EĞİTİMİ DURDUR.
-                    raise RuntimeError(
-                        "[SkyWatchTrainer] dataset.transforms bulunamadı!\n"
-                        "FaceOcclusionAug (Tez Katkı #3) devreye giremedi.\n"
-                        "Dataset nesnesi beklenmedik bir yapıda; Ultralytics versiyonunu kontrol et."
-                    )
-            except RuntimeError:
-                raise  # yukarıdaki RuntimeError'ları ilet — yakalaMA
-            except Exception as e:
-                # Beklenmedik minor hata — logla ama RuntimeError değilse devam edebilir
+        # Her çağrıyı logla — hangi mode+path kombinasyonu geldiği görünsün
+        print(f"[SKYWATCH] build_dataset çağrıldı: mode={mode!r}  path=.../{Path(img_path).name}")
+
+        if not (is_train_mode and is_train_path):
+            # Val, test veya DDP cache senaryosu — augment EKLENMEDİ
+            if is_train_mode and not is_train_path:
+                # Asıl DDP cache tuzağı: mode="train" ama path val → uyar
                 import warnings
                 warnings.warn(
-                    f"[SkyWatchTrainer] FaceOcclusionAug eklenirken beklenmedik hata: {e}\n"
-                    "Aug bu epoch için atlandı.",
-                    RuntimeWarning, stacklevel=2
+                    f"[SkyWatchTrainer] mode='train' ama img_path val içeriyor!\n"
+                    f"  path: {img_path}\n"
+                    f"  Bu muhtemelen DDP cache senaryosu. FaceOcclusionAug ATLANIYIOR.",
+                    RuntimeWarning, stacklevel=2,
                 )
+            print(f"[SKYWATCH] FaceOcclusionAug ATLANIDI (mode={mode!r}, train_path={is_train_path})")
+            return dataset
+
+        # ── Sadece gerçek train datası için aug ekle ─────────────────────────
+        # Fix #7: Augment pozisyonunu logla ve doğrula.
+        # Fix #5: transforms listesi bulunamazsa RuntimeError — sessiz devam YOK.
+        try:
+            occ_aug = FaceOcclusionAug(
+                occlusion_prob=0.35,
+                blur_prob=0.25,
+                downscale_prob=0.20,
+            )
+            if hasattr(dataset, "transforms") and dataset.transforms is not None:
+                if hasattr(dataset.transforms, "transforms"):
+                    chain = dataset.transforms.transforms
+                    insert_pos = max(len(chain) - 1, 0)  # son elemandan önce
+                    chain.insert(insert_pos, occ_aug)
+
+                    actual_pos = chain.index(occ_aug)
+                    total = len(chain)
+                    print(f"[SKYWATCH] FaceOcclusionAug eklendi: pozisyon {actual_pos}/{total - 1}")
+
+                    # Son sıradaysa muhtemelen normalize'dan SONRA — uyarı ver.
+                    if actual_pos == total - 1:
+                        import warnings
+                        warnings.warn(
+                            "[SkyWatchTrainer] FaceOcclusionAug transform zincirinin EN SONUNA eklendi!\n"
+                            "Bu, normalize'dan SONRA çalışabilir ve aug'ı etkisiz kılar.\n"
+                            "Ultralytics pipeline değişmiş olabilir; transform sırasını kontrol edin.",
+                            RuntimeWarning,
+                            stacklevel=2,
+                        )
+                    else:
+                        prev_t = type(chain[actual_pos - 1]).__name__ if actual_pos > 0 else "<baş>"
+                        next_t = type(chain[actual_pos + 1]).__name__ if actual_pos < total - 1 else "<son>"
+                        print(f"[SKYWATCH]   önce: {prev_t}  →  FaceOcclusionAug  →  sonra: {next_t}")
+                else:
+                    # Fix #5: transforms.transforms yok → API değişti → EĞİTİMİ DURDUR.
+                    raise RuntimeError(
+                        "[SkyWatchTrainer] dataset.transforms.transforms listesi bulunamadı!\n"
+                        "FaceOcclusionAug (Tez Katkı #3) devreye giremedi.\n"
+                        "Ultralytics'in iç augmentation API'si değişmiş olabilir.\n"
+                        "transform zinciri yapısını kontrol edin ve bu bloğu güncelle."
+                    )
+            else:
+                # Fix #5: transforms hiç yok → ciddi API sorunu → EĞİTİMİ DURDUR.
+                raise RuntimeError(
+                    "[SkyWatchTrainer] dataset.transforms bulunamadı!\n"
+                    "FaceOcclusionAug (Tez Katkı #3) devreye giremedi.\n"
+                    "Dataset nesnesi beklenmedik bir yapıda; Ultralytics versiyonunu kontrol et."
+                )
+        except RuntimeError:
+            raise  # yukarıdaki RuntimeError'ları ilet — yakalaMA
+        except Exception as e:
+            import warnings
+            warnings.warn(
+                f"[SkyWatchTrainer] FaceOcclusionAug eklenirken beklenmedik hata: {e}\n"
+                "Aug bu epoch için atlandı.",
+                RuntimeWarning, stacklevel=2
+            )
         return dataset
+
 
 
 
