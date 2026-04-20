@@ -123,7 +123,7 @@ PHASE1 = dict(
 #
 # Strateji:
 #   - Warm restart: dusuk lr0=0.0003, cos_lr=True
-#   - box weight: 8.5 -> 11.0  (kucuk yuz lokalizasyon vurgusu)
+#   - box weight: 8.5 ->  9.5  (recall koruyarak lokalizasyon vurgusu)
 #   - dfl weight: 2.0 ->  1.5  (P2 DFL cezasi yumusatildi)
 #   - mosaic=0.0               (fine-tune icin temiz bbox siniri)
 #   - FaceOcclusionAug korunuyor (SkyWatchTrainer uzerinden)
@@ -131,8 +131,8 @@ PHASE1 = dict(
 PHASE2 = dict(
     epochs          = 30,          # Faz 1 best.pt uzerinden 30 epoch ince ayar
     imgsz           = 640,
-    batch           = 4,           # Fine-tune: kucuk batch -> daha stabil gradient
-    nbs             = 64,          # efektif batch sabit: 4 * (64/4) = 64
+    batch           = 6,           # Faz 1 ile ayni batch (6); OOM olursa 4e dus
+    nbs             = 64,          # efektif batch sabit: 6 * (64/6) ~ 64
     lr0             = 0.0003,      # Warm restart LR (Faz 1 lr0'in 1/3u)
     lrf             = 0.01,        # Final LR = 0.0003 * 0.01 = 0.000003
     cos_lr          = True,        # Cosine LR schedule - fine-tune icin kritik
@@ -147,7 +147,7 @@ PHASE2 = dict(
     # Augmentation - Mosaic KAPALI (fine-tune box regresyon stabilitesi)
     # FaceOcclusionAug SkyWatchTrainer uzerinden aktif kalmaya devam eder.
     mosaic          = 0.0,         # Mosaic kapat: bbox kenari icin temiz imaj
-    copy_paste      = 0.05,        # Hafif copy-paste korunuyor
+    copy_paste      = 0.0,         # Kapat: FaceOcclusionAug zaten var, ust uste gurultu olur
     copy_paste_mode = "flip",
     mixup           = 0.0,         # Mixup kapat: DFL ogrenimi icin gurultu yaratmaz
     degrees         = 8.0,
@@ -159,9 +159,9 @@ PHASE2 = dict(
     erasing         = 0.0,         # Erasing kapat: DFL icin temiz bbox kenari
     multi_scale     = False,
     close_mosaic    = 30,          # mosaic=0.0 zaten kapali - dummy param
-    # box 8.5 -> 11.0: Kucuk yuz lokalizasyonunu zorla -> box_loss dusurur
+    # box 8.5 -> 9.5: Lokalizasyon vurgusu (recall zararlanmamasi icin 11.0 kullanilmadi)
     # dfl 2.0 ->  1.5: P2/DFL cezasini yumusat -> dfl_loss dusurur
-    box             = 11.0,
+    box             = 9.5,
     cls             = 0.5,
     dfl             = 1.5,
     name            = "skywatch_det_phase2",
