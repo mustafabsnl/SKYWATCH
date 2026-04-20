@@ -4,6 +4,9 @@ Tez Katkisi #2: Adaptif Kucuk Yuz Agirliklandirma Loss
 
 Bu modul v8DetectionLoss'u extend ederek kucuk yuzlere
 daha yuksek loss agirligi atar.
+
+Fix #6: Adaptif ağırlık hesaplama hatalarında artık sessiz
+fallback YOK. warnings.warn ile açık uyarı basılır.
 """
 
 import torch
@@ -108,13 +111,23 @@ class SkyWatchBboxLoss(BboxLoss):
         size_w = torch.ones_like(weight)
 
         # ── SKYWATCH ÖZELLİĞİ: Adaptif Büyüklük Ağırlığı ──────────────
+        # Fix #6: Sessiz fallback KALDIRILDI. Hata olursa açık uyarı bas.
+        # Küçük yüz ağırlığı devre dışı kalırsa bunun logda görünmesi gerekir.
         if fg_mask.sum() > 0:
             try:
                 size_w_flat = self._compute_size_weight(target_bboxes, fg_mask, stride, imgsz)
                 size_w = size_w_flat.unsqueeze(-1)
                 weight = weight * size_w
-            except Exception:
-                pass  # Boyut uyumsuzluğunda standart weight kullan
+            except Exception as _size_err:
+                import warnings
+                warnings.warn(
+                    f"[SkyWatchBboxLoss] Adaptif büyüklük ağırlığı DEVRE DIŞI kaldı!\n"
+                    f"  Hata: {_size_err}\n"
+                    f"  Küçük yüz (×{self.small_w}) ve orta yüz (×{self.mid_w}) ağırlıklandırması "
+                    f"bu batch için uygulanamadı. Standart weight kullanılıyor.",
+                    RuntimeWarning,
+                    stacklevel=3,
+                )
         # ─────────────────────────────────────────────────────────────
 
         iou = bbox_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask], xywh=False, CIoU=True)

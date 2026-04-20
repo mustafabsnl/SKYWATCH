@@ -9,6 +9,10 @@ Strateji:
 5. skywatch-det.yaml kopyala
 
 Bu yaklasim versiyon bagimliligini ortadan kaldirir.
+
+Fix #5: verify() basarisizsa sys.exit(1) ile cikilir.
+Bu sayede train_skywatch_kaggle.py'nin fail-fast kontrolu
+calisan patch olmadan egitim baslatmaz.
 """
 
 import sys
@@ -258,9 +262,13 @@ def main():
     print("\n" + "="*55)
     if ok:
         print("  Kurulum TAMAMLANDI! Egitim baslatilabilir.")
+        print("="*55)
     else:
-        print("  Hatalar var! Yukaridaki mesajlari kontrol edin.")
-    print("="*55)
+        print("  HATALAR VAR! Yukaridaki mesajlari kontrol edin.")
+        print("="*55)
+        # Fix #5: Basarisiz kurulum ile egitim baslamasin.
+        # train_skywatch_kaggle.py returncode != 0 gorurse RuntimeError firlatir.
+        sys.exit(1)
 
 
 if __name__ == "__main__":

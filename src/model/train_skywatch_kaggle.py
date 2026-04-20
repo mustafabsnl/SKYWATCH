@@ -6,14 +6,15 @@ Format  : YOLO normalize (cx cy w h) — 1 sinif: face
 Istatistik: 12,880 train / 3,226 val goruntu, ~196k yuz
 
 Egitim:
-  Faz 1 -> backbone egitimi, tam augmentasyon
-  Faz 2 -> fine-tune (opsiyonel)
+  Faz 1 → 50 epoch tam egitim (backbone + head, tam augmentasyon)
+  Faz 2 → DEVRE DISI (epochs=0). Fine-tune gerekirse --phase 2 ile aktif et.
+
+Fix #2: PHASE2 bilerek kapatildi; usteki yorum bunu yansitmiyordu.
 
 Kullanim (Kaggle Notebook):
-  !python train_skywatch_kaggle.py --phase 1
-  !python train_skywatch_kaggle.py --phase 2
-  veya tek seferde:
-  !python train_skywatch_kaggle.py --phase all
+  !python train_skywatch_kaggle.py --phase 1          # Sadece Faz 1 (tavsiye edilen)
+  !python train_skywatch_kaggle.py --phase 2          # Sadece Faz 2 (Faz 1 sonrasi)
+  !python train_skywatch_kaggle.py --phase all        # 1 sonra 2 (Faz 2 skip eder)
 """
 
 import os
@@ -52,7 +53,8 @@ CHECKPOINT_DIR = WORKING / "checkpoints"
 GITHUB_REPO    = "https://github.com/mustafabsnl/SKYWATCH.git"
 
 # SKYWATCH-Det: 4-scale detection head (P2/P3/P4/P5) + C2f_CAM + FRM
-MODEL_YAML     = "skywatch-det.yaml"
+# Fix #3: kısa isim yerine tam absolute path — göreli isim çözümleme hatası önlenir.
+MODEL_YAML     = str(REPO_DIR / "src" / "ultralytics_patch" / "cfg" / "models" / "skywatch" / "skywatch-det.yaml")
 DATA_YAML      = None   # prepare_data() tarafindan belirlenir
 
 # Her kaç epoch'ta snapshot alinsin (klasor yapisi: snapshot_epoch_N/)
@@ -65,7 +67,7 @@ CHECKPOINT_EVERY_N = 5  # 50 epoch için 5'te bir (epoch 5, 10, 15, ..., 50)
 PHASE1 = dict(
     epochs          = 50,          # Tek faz tam eğitim
     imgsz           = 640,
-    batch           = 8,           # 2xT4: 4 per GPU — OOM olmasın (nbs=64 ile grad accum)
+    batch           = 6,           # 2xT4: YOLOv11m için 3 per GPU (m modeli s'den ~2x büyük)
     nbs             = 64,          # Nominal batch: efektif batch = 8 * (64/8) = 64
     lr0             = 0.001,       # 35 epoch için standart başlangıç LR
     lrf             = 0.01,        # Final LR = lr0 * lrf = 0.00001 (derin decay)
@@ -165,12 +167,27 @@ def setup():
     print("  ORTAM KURULUMU")
     print("="*55)
 
-    # Repo clone
+    # Fix #4: Repo varsa sadece "mevcut" demek yetmiyor—eski kod çalışabilir.
+    # git pull ile her zaman en güncel kodu çek; akşi durumu engelle.
     if not REPO_DIR.exists():
         print(f"  GitHub clone: {GITHUB_REPO}")
         subprocess.run(["git", "clone", GITHUB_REPO, str(REPO_DIR)], check=True)
     else:
-        print(f"  Repo mevcut: {REPO_DIR}")
+        print(f"  Repo mevcut, güncelleniyor (git pull)...")
+        result_pull = subprocess.run(
+            ["git", "-C", str(REPO_DIR), "pull", "origin", "main"],
+            capture_output=True, text=True
+        )
+        if result_pull.returncode == 0:
+            print(f"  ✓ git pull OK: {result_pull.stdout.strip().splitlines()[-1] if result_pull.stdout.strip() else 'Degisiklik yok'}")
+        else:
+            # pull başarısızsa uyar — ama eğitimi durdurma (offline moda düşebilir)
+            import warnings
+            warnings.warn(
+                f"[setup] git pull başarısız! Mevcut repo kodu kullanılıyor.\n"
+                f"  Hata: {result_pull.stderr.strip()}",
+                RuntimeWarning, stacklevel=2
+            )
 
     # Path'e ekle (Mevcut islem icin)
     sys.path.insert(0, str(REPO_DIR))
@@ -181,27 +198,41 @@ def setup():
     os.environ["PYTHONPATH"] = f"{str(REPO_DIR)}:{str(REPO_DIR / 'src' / 'model')}:" + os.environ.get("PYTHONPATH", "")
 
 
-    # kaggle_setup.py calistir (C2f_CAM, FRM patch + YAML)
+    # ── kaggle_setup.py — BAŞARISIZSA EĞİTİMİ DURDUR ──────────────
+    # Fix #3: Patch hatası artık uyarı değil, RuntimeError.
+    # Bozuk patch ile ilerlemek beklenen mimariden sapma demektir.
     setup_script = REPO_DIR / "kaggle_setup.py"
-    if setup_script.exists():
-        result = subprocess.run([sys.executable, str(setup_script)], capture_output=False)
-        if result.returncode != 0:
-            print("  [UYARI] kaggle_setup.py hata verdi, devam ediliyor...")
-    else:
-        print("  [UYARI] kaggle_setup.py bulunamadi!")
+    if not setup_script.exists():
+        raise FileNotFoundError(
+            f"[HATA] kaggle_setup.py bulunamadı: {setup_script}\n"
+            f"Bu dosya olmadan C2f_CAM/FRM ultralytics'e enjekte edilemez."
+        )
 
-    # GPU kontrol
+    result = subprocess.run([sys.executable, str(setup_script)], capture_output=False)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"[HATA] kaggle_setup.py başarısız! (returncode={result.returncode})\n"
+            f"C2f_CAM ve FRM düzgün patchlenemedi. Eğitim durduruldu.\n"
+            f"Loglarda hangi adımın başarısız olduğunu kontrol edin."
+        )
+
+    # ── GPU bilgisi ──────────────────────────────────────────────────
     import torch
     n = torch.cuda.device_count()
     print(f"  GPU: {n}x {torch.cuda.get_device_name(0) if n>0 else 'YOK'}")
     print(f"  PyTorch: {torch.__version__}")
 
-    # Dogrula
+    # ── Custom modül import doğrulaması — BAŞARISIZSA DURDUR ────────
+    # patch başarılı görünse bile import çalışmazsa devam etme.
     try:
         from ultralytics.nn.modules import C2f_CAM, FRM
-        print("  Custom moduller aktif (C2f_CAM, FRM)")
+        print("  ✓ Custom moduller aktif: C2f_CAM, FRM")
     except ImportError as e:
-        print(f"  [HATA] Custom modul yuklenemedi: {e}")
+        raise RuntimeError(
+            f"[HATA] Custom modul import başarısız: {e}\n"
+            f"kaggle_setup.py çalıştı ama ultralytics'e inject edilemedi.\n"
+            f"Loglarda patch adımlarını kontrol edin."
+        )
 
     return n  # GPU sayisi
 
@@ -397,8 +428,10 @@ def start_snapshot_monitor(run_dir: Path, checkpoint_dir: Path,
                         _save_snapshot(epoch_count)
                         last_snapped = epoch_count
                         
-            except Exception as e:
-                pass  # Hata olursa sessizce devam et
+            except Exception as _mon_err:
+                # Fix #6: Sessiz pass kaldirildi — snapshot hatası logda görünsün.
+                # Main thread'i etkilemesin ama sessizce yutulmasın.
+                print(f"\n  ⚠️  [MONITOR] CSV okuma/kontrol hatası: {_mon_err}")
             
             _time.sleep(poll_interval)
 
@@ -581,9 +614,18 @@ def _run_channel_preflight(model_yaml: str, input_channels: int = 3, imgsz: int 
 
     if not result["ok"]:
         err = result.get("error", "Bilinmeyen hata")
-        print(f"\n  [PREFLIGHT] Doğrulama başarısız: {err}")
-        print("  [PREFLIGHT] Eğitime yine de devam ediliyor — ilk forward'da fail-fast yakalar.")
-        print("=" * 55)
+        # Fix #4: Preflight başarısızsa eğitimi başlatma.
+        # Maliyetli Kaggle job'unu ilk epoch'ta patlatmak zaman kaybıdır.
+        raise RuntimeError(
+            f"\n{'='*55}\n"
+            f"  [PREFLIGHT] KANAL DOĞRULAMASI BAŞARISIZ — EĞİTİM DURDURULDU\n"
+            f"{'='*55}\n"
+            f"  Hata   : {err}\n"
+            f"  Neden  : Yanlış kanal boyutu ile eğitim anlamsız.\n"
+            f"  Çözüm  : channel_validator.py çalıştır, YAML veya\n"
+            f"           tasks.py patch'ini kontrol et.\n"
+            f"{'='*55}"
+        )
 
 
 # ══════════════════════════════════════════════════════════

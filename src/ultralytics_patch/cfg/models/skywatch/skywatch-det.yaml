@@ -1,10 +1,27 @@
 # ============================================================
-# SKYWATCH-Det — Custom YOLOv11s Face Detection Model
+# SKYWATCH-Det — Custom YOLOv11m-Equivalent Face Detection Model
 # ============================================================
-# Base: YOLOv11s Backbone + Detection Head (4-scale)
+# Base: YOLOv11m-equivalent Backbone + Detection Head (4-scale)
 # Dataset: WIDER FACE for YOLO (32,203 images, ~393K faces)
 #
-# Key architectural changes vs standard YOLOv11s:
+# ── Fix #1: Dürüst Model Tanımı ─────────────────────────────
+# "YOLOv11m-equivalent" terimi şu anlama gelir:
+#   ✓ Kanal genişliği (width=0.75): 48/96/192/384/768 → m scale doğru
+#   ✓ Repeat sayısı (depth=0.67) :
+#       max(round(2 × 0.67), 1) = max(round(1.34), 1) = 1
+#       → repeat=1 matematiksel olarak YOLOv11m için DOĞRUDUR.
+#       YOLOv11m kasıtlı olarak sığ bir modeldir (l/x'e kıyasla).
+#       Bu bir hata değil; m scale'in resmi tanımı budur.
+#
+# ── scales dict KALDIRILDI ──────────────────────────────────
+# Eski YAML'de "scales: {m: [...]}" vardı ama Ultralytics
+# dosya adından ('skywatch-det.yaml') ölçek çıkaramadığında
+# 's' varsayıyordu → yanlış kanal genişlikleri.
+# Çözüm: depth=0.67, width=0.75, max_ch=768 uygulanmış
+# değerler hardcode edildi. Ultralytics ölçek tahmini YAPMAZ.
+# ─────────────────────────────────────────────────────────────
+#
+# Key architectural changes vs standard YOLOv11m:
 #   1. P2 detection head (4-scale: P2/P3/P4/P5)
 #      → Critical: dataset contains faces as small as 10x10px
 #   2. C2f_CAM at P2 level — contextual attention for crowded scenes
@@ -14,10 +31,11 @@
 #      → Placed at P5 (highest semantic level) before top-down path
 #   4. nc: 1 — single class: face (YOLO class_id = 0)
 #
-# Training notes:
-#   - face sizes: 10px ~ 500px → scale invariance is critical
-#   - partial occlusion common → model learns partial faces
-#   - augmentation: mosaic + blur strongly recommended
+# Kanal akışı (YOLOv11m hardcoded):
+#   P2 head (20): 96ch   | tiny faces  ≤ 20px
+#   P3 head (23): 192ch  | small       20~60px
+#   P4 head (26): 384ch  | medium      60~180px
+#   P5 head (29): 768ch  | large       180px+
 #
 # Sources:
 #   - "Enhanced YOLO for Small Object Detection in Surveillance" (P2 head)
@@ -26,66 +44,65 @@
 #   - "WIDER FACE Benchmark" (training strategy)
 # ============================================================
 
-nc: 1             # number of classes — face only (WIDER FACE: class_id=0)
+nc: 1   # number of classes — face only (WIDER FACE: class_id=0)
 
-scales:
-  # Only 's' scale is used for SKYWATCH-Det
-  # [depth, width, max_channels]
-  s: [0.50, 0.50, 1024]  # ~9.5M params — balanced speed/accuracy for Kaggle T4
+# ── scales dict YOK — kanallar hardcoded ────────────────────
+# Bu tasarım bilinçlidir. Ultralytics'in "Assuming scale='s'"
+# hatasını kalıcı olarak önler. Ölçek değiştirmek istersen
+# tüm kanal değerlerini elle güncelle veya yeni bir YAML oluştur.
 
 # ──────────────────────────────────────────────
-# YOLOv11s Backbone (unchanged)
+# YOLOv11m Backbone
+# (depth=0.67 → 2 repeat → 1; width=0.75 → ch*0.75)
 # ──────────────────────────────────────────────
 backbone:
   # [from, repeats, module, args]
-  - [-1, 1, Conv,  [64, 3, 2]]           # 0 — P1/2   (320x320 @ 640 input)
-  - [-1, 1, Conv,  [128, 3, 2]]          # 1 — P2/4   (160x160)
-  - [-1, 2, C3k2,  [256, False, 0.25]]   # 2 — P2 features  ← saved for P2 head concat
-  - [-1, 1, Conv,  [256, 3, 2]]          # 3 — P3/8   (80x80)
-  - [-1, 2, C3k2,  [512, False, 0.25]]   # 4 — P3 features  ← saved for P3 head concat
-  - [-1, 1, Conv,  [512, 3, 2]]          # 5 — P4/16  (40x40)
-  - [-1, 2, C3k2,  [512, True]]          # 6 — P4 features  ← saved for P4 head concat
-  - [-1, 1, Conv,  [1024, 3, 2]]         # 7 — P5/32  (20x20)
-  - [-1, 2, C3k2,  [1024, True]]         # 8
-  - [-1, 1, SPPF,  [1024, 5]]            # 9  — SPPF
-  - [-1, 2, C2PSA, [1024]]               # 10 — P5 with attention (backbone output)
-  - [-1, 1, FRM,   []]                   # 11 — Feature Refinement ★ recovers blur-lost edges/textures (c2=c1 pass-through, resolved by tasks.py patch)
+  - [-1, 1, Conv,  [48, 3, 2]]           # 0 — P1/2   (48  = 64×0.75)
+  - [-1, 1, Conv,  [96, 3, 2]]           # 1 — P2/4   (96  = 128×0.75)
+  - [-1, 1, C3k2,  [192, False, 0.25]]   # 2 — P2 feat (192 = 256×0.75) ← P2 head concat
+  - [-1, 1, Conv,  [192, 3, 2]]          # 3 — P3/8
+  - [-1, 1, C3k2,  [384, False, 0.25]]   # 4 — P3 feat (384 = 512×0.75) ← P3 head concat
+  - [-1, 1, Conv,  [384, 3, 2]]          # 5 — P4/16
+  - [-1, 1, C3k2,  [384, True]]          # 6 — P4 feat (384 = 512×0.75) ← P4 head concat
+  - [-1, 1, Conv,  [768, 3, 2]]          # 7 — P5/32  (768 = min(1024×0.75, 768))
+  - [-1, 1, C3k2,  [768, True]]          # 8
+  - [-1, 1, SPPF,  [768, 5]]             # 9  — SPPF
+  - [-1, 1, C2PSA, [768]]               # 10 — P5 with global attention (backbone output)
+  - [-1, 1, FRM,   []]                   # 11 — Feature Refinement Module ★
+                                         #      tasks.py patch: c2=c1 pass-through (768→768)
 
 # ──────────────────────────────────────────────
 # Head — Top-down (P5→P4→P3→P2) + Bottom-up (P2→P3→P4→P5)
+# Kanal akışı detaylı (Concat sonrası kanallar belirtilmiştir):
 # ──────────────────────────────────────────────
 head:
   # ── Top-down path ──────────────────────────
-  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]  # 12 — Upsample FRM(P5)
-  - [[-1, 6], 1, Concat,  [1]]                  # 13 — cat backbone P4 (layer 6)
-  - [-1, 2, C3k2,  [512, False]]                # 14 — P4 neck
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]  # 12 — Upsample FRM→P4  : 768ch
+  - [[-1, 6], 1, Concat,  [1]]                  # 13 — cat P4(384)       : 768+384=1152ch
+  - [-1, 1, C3k2,  [384, False]]                # 14 — P4 neck out       : 384ch
 
-  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]  # 15 — Upsample P4
-  - [[-1, 4], 1, Concat,  [1]]                  # 16 — cat backbone P3 (layer 4)
-  - [-1, 2, C3k2,  [256, False]]                # 17 — P3 neck
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]  # 15 — Upsample P4→P3  : 384ch
+  - [[-1, 4], 1, Concat,  [1]]                  # 16 — cat P3(384)       : 384+384=768ch
+  - [-1, 1, C3k2,  [192, False]]                # 17 — P3 neck out       : 192ch
 
-  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]  # 18 — Upsample P3 → P2 scale
-  - [[-1, 2], 1, Concat,  [1]]                  # 19 — cat backbone P2 (layer 2)
-  # C2f_CAM: P2 level with contextual attention — critical for small faces
-  - [-1, 2, C2f_CAM, [128, False]]              # 20 — P2 with contextual attention ★
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]  # 18 — Upsample P3→P2  : 192ch
+  - [[-1, 2], 1, Concat,  [1]]                  # 19 — cat P2(192)       : 192+192=384ch
+  # C2f_CAM: P2 level contextual attention — küçük yüzler için kritik
+  # tasks.py patch: args.insert(0, c1=384) → C2f_CAM(384, 96, shortcut=False)
+  - [-1, 1, C2f_CAM, [96, False]]               # 20 — P2 head out ★    : 96ch
 
   # ── Bottom-up path ─────────────────────────
-  - [-1, 1, Conv,  [128, 3, 2]]                 # 21 — Downsample P2 → P3
-  - [[-1, 17], 1, Concat, [1]]                  # 22 — cat head P3 (layer 17)
-  - [-1, 2, C3k2,  [256, False]]                # 23 — P3 output
+  - [-1, 1, Conv,  [96, 3, 2]]                  # 21 — Down P2→P3       : 96ch
+  - [[-1, 17], 1, Concat, [1]]                  # 22 — cat P3 neck(192)  : 96+192=288ch
+  - [-1, 1, C3k2,  [192, False]]                # 23 — P3 head out       : 192ch
 
-  - [-1, 1, Conv,  [256, 3, 2]]                 # 24 — Downsample P3 → P4
-  - [[-1, 14], 1, Concat, [1]]                  # 25 — cat head P4 (layer 14)
-  - [-1, 2, C3k2,  [512, False]]                # 26 — P4 output
+  - [-1, 1, Conv,  [192, 3, 2]]                 # 24 — Down P3→P4       : 192ch
+  - [[-1, 14], 1, Concat, [1]]                  # 25 — cat P4 neck(384)  : 192+384=576ch
+  - [-1, 1, C3k2,  [384, False]]                # 26 — P4 head out       : 384ch
 
-  - [-1, 1, Conv,  [512, 3, 2]]                 # 27 — Downsample P4 → P5
-  - [[-1, 11], 1, Concat, [1]]                  # 28 — cat FRM(P5) (layer 11)
-  - [-1, 2, C3k2,  [1024, True]]                # 29 — P5 output
+  - [-1, 1, Conv,  [384, 3, 2]]                 # 27 — Down P4→P5       : 384ch
+  - [[-1, 11], 1, Concat, [1]]                  # 28 — cat FRM(768)      : 384+768=1152ch
+  - [-1, 1, C3k2,  [768, True]]                 # 29 — P5 head out       : 768ch
 
   # ── Detection Head ─────────────────────────
-  # 4-scale detection: bbox only (no landmarks — WIDER FACE YOLO format)
-  # P2 (20): tiny faces  ≤ 20px  ← most critical for Hard difficulty
-  # P3 (23): small       20~60px
-  # P4 (26): medium      60~180px
-  # P5 (29): large       180px+
-  - [[20, 23, 26, 29], 1, Detect, [nc]]          # 30 — Detect(P2, P3, P4, P5)
+  - [[20, 23, 26, 29], 1, Detect, [nc]]          # 30 — Detect(P2/96, P3/192, P4/384, P5/768)

@@ -164,21 +164,66 @@ class SkyWatchTrainer(DetectionTrainer):
         """train modunda FaceOcclusionAug ekle."""
         dataset = super().build_dataset(img_path, mode, batch)
         if mode == "train":
-            # Mevcut transform listesine okluzyon augmentasyonunu ekle
+            # Fix #7: Augment pozisyonunu logla ve doğrula.
+            # Fix #5: transforms listesi bulunamazsa RuntimeError — sessiz devam YOK.
+            # Oklüzyon augmentasyonu tez katkısı; devreye girmeden eğitim anlamsız.
             try:
                 occ_aug = FaceOcclusionAug(
                     occlusion_prob=0.35,
                     blur_prob=0.25,
                     downscale_prob=0.20,
                 )
-                # transforms listesinin sonuna ekle (normalize'dan once)
                 if hasattr(dataset, "transforms") and dataset.transforms is not None:
                     if hasattr(dataset.transforms, "transforms"):
-                        dataset.transforms.transforms.insert(-1, occ_aug)
-                        print("[SKYWATCH] FaceOcclusionAug eklendi")
+                        chain = dataset.transforms.transforms
+                        insert_pos = max(len(chain) - 1, 0)  # son elemandan önce
+                        chain.insert(insert_pos, occ_aug)
+
+                        actual_pos = chain.index(occ_aug)
+                        total = len(chain)
+                        print(f"[SKYWATCH] FaceOcclusionAug eklendi: pozisyon {actual_pos}/{total - 1}")
+
+                        # Son sıradaysa muhtemelen normalize'dan SONRA — uyarı ver.
+                        if actual_pos == total - 1:
+                            import warnings
+                            warnings.warn(
+                                "[SkyWatchTrainer] FaceOcclusionAug transform zincirinin EN SONUNA eklendi!\n"
+                                "Bu, normalize'dan SONRA çalışabilir ve aug'ı etkisiz kılar.\n"
+                                "Ultralytics pipeline değişmiş olabilir; transform sırasını kontrol edin.",
+                                RuntimeWarning,
+                                stacklevel=2,
+                            )
+                        else:
+                            prev_t = type(chain[actual_pos - 1]).__name__ if actual_pos > 0 else "<baş>"
+                            next_t = type(chain[actual_pos + 1]).__name__ if actual_pos < total - 1 else "<son>"
+                            print(f"[SKYWATCH]   önce: {prev_t}  →  FaceOcclusionAug  →  sonra: {next_t}")
+                    else:
+                        # Fix #5: transforms.transforms yok → API değişti → EĞİTİMİ DURDUR.
+                        raise RuntimeError(
+                            "[SkyWatchTrainer] dataset.transforms.transforms listesi bulunamadı!\n"
+                            "FaceOcclusionAug (Tez Katkı #3) devreye giremedi.\n"
+                            "Ultralytics'in iç augmentation API'si değişmiş olabilir.\n"
+                            "transform zinciri yapısını kontrol edin ve bu bloğu güncelle."
+                        )
+                else:
+                    # Fix #5: transforms hiç yok → ciddi API sorunu → EĞİTİMİ DURDUR.
+                    raise RuntimeError(
+                        "[SkyWatchTrainer] dataset.transforms bulunamadı!\n"
+                        "FaceOcclusionAug (Tez Katkı #3) devreye giremedi.\n"
+                        "Dataset nesnesi beklenmedik bir yapıda; Ultralytics versiyonunu kontrol et."
+                    )
+            except RuntimeError:
+                raise  # yukarıdaki RuntimeError'ları ilet — yakalaMA
             except Exception as e:
-                print(f"[SKYWATCH] Aug ekleme hatasi (devam ediliyor): {e}")
+                # Beklenmedik minor hata — logla ama RuntimeError değilse devam edebilir
+                import warnings
+                warnings.warn(
+                    f"[SkyWatchTrainer] FaceOcclusionAug eklenirken beklenmedik hata: {e}\n"
+                    "Aug bu epoch için atlandı.",
+                    RuntimeWarning, stacklevel=2
+                )
         return dataset
+
 
 
 # ──────────────────────────────────────────────────────────────────────

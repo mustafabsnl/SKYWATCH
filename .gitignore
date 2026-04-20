@@ -1,13 +1,13 @@
 # ══════════════════════════════════════════════════════
-# SKYWATCH .gitignore
-# GitHub'a sadece KOD gider, veri/model GITMEZ
+# SKYWATCH .gitignore — v3.0.0
+# GitHub'a sadece KOD gider, veri/model/çıktı GITMEZ
 # ══════════════════════════════════════════════════════
 
-# ── ultralytics_skywatch: Kaggle'da kaggle_setup.py île patch ediliyor ──
+# ── ultralytics_skywatch: Kaggle'da kaggle_setup.py ile patch ediliyor ──
 # Bu klasöre artık gerek yok — tamamen dışarda bırak
 ultralytics_skywatch/
 
-# ── Veri Setleri (GB boyutunda) ─────────────────────
+# ── Veri Setleri (GB boyutunda) ──────────────────────
 VeriSeti/
 dataset_yolo/
 data/
@@ -17,14 +17,14 @@ datasets/
 *.tar
 *.7z
 
-# ── Yerel Archive Dataset (fareselmenshawii/face-detection-dataset)
+# ── Yerel Archive Dataset ────────────────────────────
 # Kaggle'da kagglehub ile indirilir — GitHub'a GITMEZ
 archive/
 
-# ── WIDER FACE Orijinal Dataset (ham hali)
+# ── WIDER FACE Orijinal Dataset (ham hali) ──────────
 Kalabalık_yuz_veri_seti/
 
-# ── WIDER FACE → YOLO Dönüştürülmüş Dataset
+# ── WIDER FACE → YOLO Dönüştürülmüş Dataset ─────────
 # wider_to_yolo.py ile oluşturulur — GitHub'a GITMEZ (GB boyutunda)
 skywatch_wider/
 
@@ -32,8 +32,8 @@ skywatch_wider/
 # Kaggle'da train_skywatch_kaggle.py tarafından dinamik oluşturulur
 archive/data.yaml
 
-# ── Model Ağırlıkları ────────────────────────────────
-/models/                   # Sadece kök /models/ klasörü (trained weights)
+# ── Model Ağırlıkları ─────────────────────────────────
+/models/                    # Sadece kök /models/ klasörü (trained weights)
 # NOT: src/ultralytics_patch/cfg/models/ → KOD, gitignore'dan muaf
 *.pt
 *.pth
@@ -43,11 +43,15 @@ archive/data.yaml
 *.torchscript
 checkpoints/
 
-# ── Ultralytics Eğitim Çıktıları ────────────────────
+# ── Kaggle Eğitim + Snapshot Çıktıları ───────────────
+# Kaggle /kaggle/working/ altında üretilir — repoya GITMEZ
 runs/
 wandb/
+snapshot_epoch_*.zip
+skywatch_det_*.zip
+skywatch_data/
 
-# ── Python ──────────────────────────────────────────
+# ── Ultralytics / Python Önbelleği ───────────────────
 __pycache__/
 *.py[cod]
 *.pyo
@@ -60,33 +64,33 @@ build/
 .eggs/
 pip-log.txt
 
-# ── Sanal Ortam ──────────────────────────────────────
+# ── Sanal Ortam ───────────────────────────────────────
 venv/
 env/
 .env
 .venv/
 ENV/
 
-# ── Jupyter / Kaggle Notebook ────────────────────────
+# ── Jupyter / Kaggle Notebook ─────────────────────────
 .ipynb_checkpoints/
 *.ipynb
 
-# ── Veritabanı ve Kişisel Veriler ───────────────────
+# ── Veritabanı ve Kişisel Veriler ────────────────────
 database/skywatch.db
 database/photos/
 logs/
 *.log
 
-# ── Ekran Görüntüleri / Video / Büyük Binary ────────────────
+# ── Ekran Görüntüleri / Video / Büyük Binary ─────────
 logs/detections/
 *.webm
 *.mp4
 *.avi
 *.mov
-# Rapor belgesi (büyük binary, git'te taşımak yoğuntur)
+# Rapor belgesi (büyük binary, git'te taşımak yoğundur)
 SKYWATCH_RAPOR.docx
 
-# ── IDE ─────────────────────────────────────────────
+# ── IDE ───────────────────────────────────────────────
 .vscode/
 .idea/
 *.swp
@@ -94,7 +98,7 @@ SKYWATCH_RAPOR.docx
 *.sublime-project
 *.sublime-workspace
 
-# ── OS ──────────────────────────────────────────────
+# ── OS ────────────────────────────────────────────────
 .DS_Store
 .DS_Store?
 ._*
@@ -104,7 +108,7 @@ Thumbs.db
 ehthumbs.db
 desktop.ini
 
-# ── Geçici Dosyalar ──────────────────────────────────
+# ── Geçici Dosyalar ───────────────────────────────────
 *.tmp
 *.bak
 *.orig
@@ -112,18 +116,23 @@ desktop.ini
 .cache/
 tmp/
 
-# ── ultralytics_skywatch — Derleme Artıkları ────────────────
-# (Klasörün tamamı zaten ↗’de dışlandı)
+# ── ultralytics_skywatch — Derleme Artıkları ─────────
+# (Klasörün tamamı zaten yukarıda dışlandı)
 ultralytics_skywatch/**/__pycache__/
 ultralytics_skywatch/**/*.pyc
 ultralytics_skywatch/**/*.egg-info/
 ultralytics_skywatch/build/
 ultralytics_skywatch/dist/
 
-# ── Yerel Eğitim Çıktıları ────────────────────────────────
+# ── Yerel Eğitim Çıktıları ───────────────────────────
 src/model/runs/
 
-# Custom modeller ve özel dosyalar GitHub'a GİDER ✅
-# src/ultralytics_patch/  ← GIT'TE KALIR
-# src/model/              ← GIT'TE KALIR
-# kaggle_setup.py         ← GIT'TE KALIR
+# ═══════════════════════════════════════════════════════
+# GitHub'a GİDEN DOSYALAR ✅ (bu satırlar yorum, kural değil)
+# ═══════════════════════════════════════════════════════
+# src/ultralytics_patch/          ← Custom modül kodu (C2f_CAM, FRM, YAML)
+# src/model/                      ← Eğitim scriptleri, loss, trainer
+# kaggle_setup.py                 ← Kaggle patch scripti
+# kaggle_training_50epoch.py      ← Kaggle notebook başlatıcı
+# requirements.txt                ← Bağımlılıklar
+# README.md / KAGGLE_GUIDE.md    ← Dokümantasyon
