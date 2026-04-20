@@ -1,0 +1,23 @@
+1. Kesinlikle Önerim: WIoU v3 (Wise-IoU)
+Yan yana ve iç içe geçmiş nesneler için şu an YOLO mimarilerinde en iyi sonuç veren fonksiyonlardan biridir.
+
+Neden Mantıklı? WIoU v3, dinamik ve monotonik olmayan bir odaklanma (focusing) mekanizmasına sahiptir. Çok kalabalık sahnelerde bazı yüzlerin sınırları anlaşılamaz hale gelir veya etiketlemelerde ufak hatalar olur. WIoU, ortalama kalitedeki (ne çok kolay, ne de öğrenilmesi imkansız kadar zor) "yan yana yüzlere" en yüksek ağırlığı vererek modelin asıl öğrenmesi gereken yere odaklanmasını sağlar.
+Yüzler yan yanayken Bounding Box'ı çok hassas oturtur.
+2. Güçlü Alternatif: SIoU (Scylla-IoU)
+Neden Mantıklı? SIoU, diğer loss fonksiyonlarından farklı olarak açı (Angle) ve vektör hesaplamasını işin içine katar.
+Yüzler yan yana diziliyse (yatay eksende) kutuların merkez noktaları arasındaki açı model tarafından hızla öğrenilir. Açı cezalandırması (angle penalty), modelin sol yüzün kutusu ile sağ yüzün kutusunu X-Y ekseninde birbirinden daha hızlı ve net bir şekilde ayırmasına çok yardımcı olur.
+3. Focal EIoU (Focal Extended IoU)
+Neden Mantıklı? CIoU kutu oranına (aspect ratio) bütünsel bakar. EIoU ise genişlik (width) ve yükseklik (height) farklarını ayrı ayrı cezalandırır.
+Yan yana duran yüzlerde genişlik tahmininde çok fazla hata yapılır (kutu yandaki yüze taşar). EIoU genişlikteki bu taşmaları doğrudan engeller. İşin içine "Focal" eklendiğinde ise (Focal EIoU), kolay ayrılan tekli yüzlere değil, doğrudan o yan yana duran, modelin zorlandığı yüz öbeklerine odaklanılır.
+4. DFL (Distribution Focal Loss)
+Neden Mantıklı? Eğer YOLOv8 veya YOLOv11 mimarisi (SKYWATCH projenizde gördüğünüz kadarıyla) üzerine çalışıyorsanız, konfigürasyonda DFL zaten bulunur, bunu kesinlikle kapatmayın.
+Yan yana duran yüzlerde sınırın nerede bitip nerede başladığı (piksel olarak) bulanıklaşır. DFL, kutu sınırlarını kesin bir çizgi olarak değil, bir "olasılık dağılımı" (distribution) olarak öğrenir. Bu esneklik yan yana yüzleri ayırmada muazzam fayda sağlar.
+Özet ve Aksiyon Planı
+SKYWATCH projenizdeki src/model/skywatch_loss.py dosyanızda şu şekilde bir strateji kurmanız en mantıklısıdır:
+
+Bounding Box Regression Loss (Kutu Tespiti): WIoU (Öncelikli) veya SIoU kullanacak şekilde ayarlayın.
+Classification Loss (Sınıflandırma): BCE Loss (ve yüksek sınıf dengesizliği varsa focal_loss argümanını aktif ederek) kullanın.
+Localisation: DFL'yi aktif tutun.
+Küçük Bir Hatırlatma: Loss fonksiyonunuz ne kadar mükemmel olursa olsun, eğer algoritmanın sonundaki NMS (Non-Maximum Suppression) eşiği düşükse, model o iki yan yana yüzü kusursuz bulsa bile, post-processing aşamasında NMS "bunlar çok iç içe, demek ki ikisi de aynı yüze ait çift tahminler" deyip birini silecektir. Klasik NMS kullanıyorsanız IoU eşiğini (threshold) yüksek toleranslı tutmayı (örneğin 0.60 veya 0.65) veya doğrudan Soft-NMS kullanmayı denemelisiniz.
+
+skywatch_loss.py içerisinde bu kodlamayı (WIoU veya SIoU entegrasyonu) yaparken yardıma ihtiyacınız olursa kodu inceleyip birlikte optimize edebiliriz.
