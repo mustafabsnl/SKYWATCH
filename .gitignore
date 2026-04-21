@@ -35,7 +35,7 @@ archive/data.yaml
 # ── Model Ağırlıkları ─────────────────────────────────
 /models/                    # Sadece kök /models/ klasörü (trained weights)
 # NOT: src/ultralytics_patch/cfg/models/ → KOD, gitignore'dan muaf
-*.pt
+#*.pt
 *.pth
 *.onnx
 *.engine
