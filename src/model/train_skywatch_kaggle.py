@@ -111,7 +111,7 @@ PHASE1 = dict(
 )
 
 # ══════════════════════════════════════════════════════════
-# FAZ 2 - FINE-TUNE (best.pt uzerinden, 30 epoch)
+# FAZ 2 - FINE-TUNE (best.pt uzerinden, 50 epoch)
 # ══════════════════════════════════════════════════════════
 # Neden box_loss/dfl_loss Faz 1de yuksek kaldi?
 #   1. SkyWatchBboxLoss kucuk yuzlere 3x agirlik -> sayi yapay sisiyor
@@ -129,7 +129,7 @@ PHASE1 = dict(
 #   - FaceOcclusionAug korunuyor (SkyWatchTrainer uzerinden)
 # ══════════════════════════════════════════════════════════
 PHASE2 = dict(
-    epochs          = 30,          # Faz 1 best.pt uzerinden 30 epoch ince ayar
+    epochs          = 50,          # Faz 1 best.pt uzerinden 50 epoch ince ayar
     imgsz           = 640,
     batch           = 6,           # Faz 1 ile ayni batch (6); OOM olursa 4e dus
     nbs             = 64,          # efektif batch sabit: 6 * (64/6) ~ 64
@@ -138,11 +138,11 @@ PHASE2 = dict(
     cos_lr          = True,        # Cosine LR schedule - fine-tune icin kritik
     momentum        = 0.937,
     weight_decay    = 0.0005,
-    warmup_epochs   = 2,           # Kisa warmup (2/30 ~ %7)
+    warmup_epochs   = 3,           # 50 epoch icon kisa warmup (~%6)
     warmup_momentum = 0.8,
     warmup_bias_lr  = 0.01,
     optimizer       = "AdamW",
-    patience        = 15,
+    patience        = 20,          # 50 epoch icon uygun patience
     save_period     = 5,
     # Augmentation - Mosaic KAPALI (fine-tune box regresyon stabilitesi)
     # FaceOcclusionAug SkyWatchTrainer uzerinden aktif kalmaya devam eder.
@@ -158,7 +158,7 @@ PHASE2 = dict(
     hsv_v           = 0.3,
     erasing         = 0.0,         # Erasing kapat: DFL icin temiz bbox kenari
     multi_scale     = False,
-    close_mosaic    = 30,          # mosaic=0.0 zaten kapali - dummy param
+    close_mosaic    = 50,          # mosaic=0.0 zaten kapali - dummy param
     # box 8.5 -> 9.5: Lokalizasyon vurgusu (recall zararlanmamasi icin 11.0 kullanilmadi)
     # dfl 2.0 ->  1.5: P2/DFL cezasini yumusat -> dfl_loss dusurur
     box             = 9.5,
