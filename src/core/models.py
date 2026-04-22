@@ -59,6 +59,10 @@ class Track:
     
     # Kamera
     camera_id: str = ""
+    
+    # OC-SORT Velocity Consistency (Makale #2)
+    # False → bu frame'de hız vektörü anormal sapma gösterdi (potansiyel yanlış eşleşme)
+    velocity_ok: bool = True
 
 
 @dataclass

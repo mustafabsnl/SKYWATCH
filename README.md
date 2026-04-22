@@ -5,7 +5,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11+-blue)](https://python.org)
 [![CUDA](https://img.shields.io/badge/CUDA-12.6-green)](https://developer.nvidia.com/cuda-toolkit)
 [![License](https://img.shields.io/badge/License-MIT-grey)](LICENSE)
-
+venv\Scripts\python.exe src\run_gui.py
 ---
 
 ## 🎯 Ne Yapar?

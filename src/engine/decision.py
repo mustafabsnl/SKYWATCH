@@ -33,35 +33,39 @@ class DecisionEngine:
         Returns:
             DecisionResult: UI overlay ve loglama için gerekli veriler
         """
-        status = "CLEAN"
+        status      = "CLEAN"
         danger_level = "LOW"
-        color = self.colors["CLEAN"]
+        color       = self.colors["CLEAN"]
         
         # 1. Sabıka Veritabanı Eşleşmesi Öncelikli
         if track.criminal_match is not None and criminal_info is not None:
-            # DB durumu (WANTED veya CRIMINAL)
-            db_status = criminal_info.get("status", "CRIMINAL").upper()
+            db_status    = criminal_info.get("status", "CRIMINAL").upper()
             danger_level = criminal_info.get("danger_level", "LOW").upper()
             
             if db_status == "WANTED":
                 status = "WANTED"
-                color = self.colors["WANTED"]
+                color  = self.colors["WANTED"]
             elif db_status == "CRIMINAL":
                 status = "CRIMINAL"
-                
-                # Çok tehlikeli sabıkalılar da kırmızı işaretlenebilir
                 if danger_level in ["HIGH", "CRITICAL"]:
                     color = self.colors["WANTED"]
                 else:
                     color = self.colors["CRIMINAL"]
                     
-        # 2. Hareket Analizi (Sabıkası yok ama hareketleri şüpheliyse)
-        elif track.movement.behavior_score >= 0.7 or track.movement.behavior_label == "running":
+        # 2. Hareket Analizi
+        # DÜZELTİLDİ: eşik 0.7 → 0.6 (movement.py max skoru 0.75 ile uyumlu)
+        elif track.movement.behavior_score >= 0.60 or track.movement.behavior_label == "running":
             status = "SUSPICIOUS"
-            color = self.colors["SUSPICIOUS"]
-            
-        # 3. Yeterince net değilse (Örn: Track yeni başladı)
-        if track.age < 3: # henuz 3 frame olmadiysa gri
+            color  = self.colors["SUSPICIOUS"]
+
+        # 3. Velocity Consistency uyarısı
+        # OC-SORT: Hız tutarsız → track henüz güvenilir değil → UNKNOWN göster
+        if not track.velocity_ok and status == "CLEAN":
+            color = self.colors["UNKNOWN"]
+
+        # 4. Track henüz yeterli frame görmedi → gri
+        # DÜZELTİLDİ: < 3 → < 5 (daha güvenli başlangıç penceresi)
+        if track.age < 5:
             color = self.colors["UNKNOWN"]
 
         return DecisionResult(
@@ -75,3 +79,4 @@ class DecisionEngine:
             behavior_label=track.movement.behavior_label,
             global_id=track.global_id
         )
+

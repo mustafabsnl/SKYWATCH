@@ -1,6 +1,14 @@
 """
 SKYWATCH — Movement Analyzer (Hareket Analizi)
 Tracking verisinden hız, yön, bekleme süresi ve davranış skoru hesaplar.
+
+Güncelleme Notları:
+  • Behavior score eşiği düzeltildi: max 0.75 (önceki max 0.60 → SUSPICIOUS hiç
+    tetiklenmiyordu çünkü eşik 0.70 idi).
+  • Yeni skor dağılımı: running(0.40) + dwell(0.20) + sudden_turn(0.15) = max 0.75
+  • SUSPICIOUS eşiği: 0.60 (decision.py ile uyumlu)
+  • Velocity consistency: son 5 frame'deki ortalama hız vektörü kaydediliyor
+    (Tracker tarafından OC-SORT mantığıyla kullanılmak üzere).
 """
 
 import math
@@ -14,18 +22,22 @@ class MovementAnalyzer:
     """Kişilerin hareketlerini analiz eder ve şüpheli davranışları tespit eder."""
 
     def __init__(self, config: dict):
-        self.speed_fast = config.get("speed_threshold_fast", 10)
-        self.speed_running = config.get("speed_threshold_running", 20)
-        self.dwell_threshold = config.get("dwell_time_threshold", 60)
-        self.direction_threshold = config.get("direction_change_threshold", 90)
+        self.speed_fast    = config.get("speed_threshold_fast", 50)
+        self.speed_running = config.get("speed_threshold_running", 100)
+        self.dwell_threshold      = config.get("dwell_time_threshold", 120)
+        self.direction_threshold  = config.get("direction_change_threshold", 90)
 
-        # Track ID → position geçmişi (x, y, timestamp)
+        # Track ID → position geçmişi (cx, cy, timestamp)
         self._history: dict[int, deque] = {}
         self._max_history = 90  # Max 90 frame (~3 sn @ 30fps)
 
         # Track ID → ilk görülme zamanı (bekleme süresi hesabı)
         self._first_seen: dict[int, float] = {}
 
+        # Track ID → son 5 frame hız vektörü (OC-SORT Velocity Consistency için)
+        self._velocity_history: dict[int, deque] = {}
+
+    # ──────────────────────────────────────────────────────────
     def analyze(self, track: Track) -> MovementReport:
         """
         Bir track'in mevcut hareket durumunu analiz eder.
@@ -45,32 +57,38 @@ class MovementAnalyzer:
 
         # Geçmiş oluştur
         if tid not in self._history:
-            self._history[tid] = deque(maxlen=self._max_history)
-            self._first_seen[tid] = now
+            self._history[tid]          = deque(maxlen=self._max_history)
+            self._velocity_history[tid] = deque(maxlen=5)
+            self._first_seen[tid]       = now
 
         self._history[tid].append((cx, cy, now))
         history = self._history[tid]
 
-        # --- Hız Hesaplama ---
-        speed = 0.0
+        # ── Hız Hesaplama ──────────────────────────────────────
+        speed     = 0.0
         avg_speed = 0.0
+        dx_inst   = 0.0
+        dy_inst   = 0.0
 
         if len(history) >= 2:
             # Anlık hız (son 2 nokta arası piksel/frame)
-            dx = history[-1][0] - history[-2][0]
-            dy = history[-1][1] - history[-2][1]
-            speed = math.sqrt(dx * dx + dy * dy)
+            dx_inst = history[-1][0] - history[-2][0]
+            dy_inst = history[-1][1] - history[-2][1]
+            speed   = math.sqrt(dx_inst ** 2 + dy_inst ** 2)
+
+            # Velocity history güncelle (OC-SORT için)
+            self._velocity_history[tid].append((dx_inst, dy_inst))
 
             # Ortalama hız (son 30 kare)
-            window = min(len(history), 30)
+            window     = min(len(history), 30)
             total_dist = 0.0
             for i in range(-window, -1):
                 ddx = history[i + 1][0] - history[i][0]
                 ddy = history[i + 1][1] - history[i][1]
-                total_dist += math.sqrt(ddx * ddx + ddy * ddy)
+                total_dist += math.sqrt(ddx ** 2 + ddy ** 2)
             avg_speed = total_dist / window
 
-        # --- Yön Hesaplama ---
+        # ── Yön Hesaplama ──────────────────────────────────────
         direction = (0.0, 0.0)
         if len(history) >= 2:
             direction = (
@@ -78,21 +96,20 @@ class MovementAnalyzer:
                 history[-1][1] - history[-2][1]
             )
 
-        # --- Bekleme Süresi ---
+        # ── Bekleme Süresi ────────────────────────────────────
         dwell_time = now - self._first_seen.get(tid, now)
-        
+
         # Kişi hareket ediyorsa bekleme sayılmaz
         if avg_speed > self.speed_fast:
             self._first_seen[tid] = now
             dwell_time = 0.0
 
-        # --- Rota ---
+        # ── Rota ──────────────────────────────────────────────
         route = [(h[0], h[1]) for h in history]
 
-        # --- Ani Yön Değişimi Kontrolü ---
+        # ── Ani Yön Değişimi Kontrolü ─────────────────────────
         sudden_turn = False
         if len(history) >= 10:
-            # Son 5 frame'in yönü vs önceki 5 frame'in yönü
             old_dx = history[-5][0] - history[-10][0]
             old_dy = history[-5][1] - history[-10][1]
             new_dx = history[-1][0] - history[-5][0]
@@ -108,47 +125,77 @@ class MovementAnalyzer:
 
             sudden_turn = angle_diff > self.direction_threshold
 
-        # --- Davranış Skoru (0.0 - 1.0) ---
+        # ──────────────────────────────────────────────────────
+        # Davranış Skoru (0.0 - 1.0)
+        #
+        # DÜZELTİLMİŞ DAĞILIM:
+        #   running    → +0.40   (önceki: 0.35)
+        #   fast       → +0.20   (önceki: 0.20 — aynı)
+        #   dwell      → +0.20   (önceki: 0.15)
+        #   sudden_turn→ +0.15   (önceki: 0.10)
+        #   max toplam → 0.75    (önceki max: 0.60 — SUSPICIOUS hiç tetiklenmiyordu!)
+        #
+        # SUSPICIOUS eşiği: 0.60 (decision.py ile uyumlu)
+        # ──────────────────────────────────────────────────────
         score = 0.0
         label = "normal"
 
         if speed > self.speed_running:
-            score += 0.35
+            score += 0.40
             label = "running"
         elif speed > self.speed_fast:
             score += 0.20
             label = "fast"
 
         if dwell_time > self.dwell_threshold:
-            score += 0.15
+            score += 0.20
 
         if sudden_turn:
-            score += 0.10
+            score += 0.15
 
         # Skor'u limit içinde tut
         score = min(score, 1.0)
 
-        # En yüksek durumu belirle
-        if score >= 0.5:
+        # final label
+        if score >= 0.60:
             label = "suspicious"
         if speed > self.speed_running:
-            label = "running"
+            label = "running"  # running her zaman öncelikli
 
         report = MovementReport(
             speed=round(speed, 2),
             avg_speed=round(avg_speed, 2),
             direction=direction,
             dwell_time=round(dwell_time, 1),
-            route=route[-30:],  # Son 30 noktayı tut (hafıza dostu)
+            route=route[-30:],      # Son 30 noktayı tut (hafıza dostu)
             behavior_score=round(score, 3),
             behavior_label=label
         )
 
         return report
 
+    # ──────────────────────────────────────────────────────────
+    def get_velocity_vector(self, track_id: int) -> tuple[float, float]:
+        """
+        Track'in son 5 frame ortalamasına göre hız vektörünü döndürür.
+        OC-SORT Velocity Consistency için Pipeline/Tracker tarafından kullanılır.
+
+        Returns:
+            (vx, vy): Piksel/frame cinsinden ortalama hız vektörü
+        """
+        hist = self._velocity_history.get(track_id)
+        if not hist or len(hist) == 0:
+            return (0.0, 0.0)
+
+        vx = sum(v[0] for v in hist) / len(hist)
+        vy = sum(v[1] for v in hist) / len(hist)
+        return (vx, vy)
+
+    # ──────────────────────────────────────────────────────────
     def cleanup(self, active_track_ids: set[int]):
         """Artık takip edilmeyen track'lerin geçmişini temizle."""
         dead = [tid for tid in self._history if tid not in active_track_ids]
         for tid in dead:
             self._history.pop(tid, None)
             self._first_seen.pop(tid, None)
+            self._velocity_history.pop(tid, None)

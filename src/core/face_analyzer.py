@@ -1,140 +1,169 @@
 """
-SKYWATCH — FaceAnalyzer (Yüz Algılama ve Embedding)
-InsightFace kütüphanesi wrapper sınıfı.
+SKYWATCH — Yüz Analiz Modülü (YOLO best.pt tabanlı)
+
+InsightFace/buffalo_l KULLANILMIYOR.
+Tüm aşamalar best.pt ile çalışır:
+  - Yüz algılama → YOLO best.pt (ultralytics)
+  - Embedding     → Kırpılmış yüz crop → normalize piksel vektörü (512-d)
 """
 
-# İLK import: cuDNN DLL'lerini PATH'e ekler
-import utils.gpu_setup  # noqa: F401
-
-import os
-import sys
 import numpy as np
+import cv2
 from pathlib import Path
 
-import insightface
-from insightface.app import FaceAnalysis
-
 from .models import FaceResult
-from utils.config import AppConfig
+
+# ── Sabitler ─────────────────────────────────────────────────────────────────
+_EMBED_SIZE  = 64          # crop boyutu → 64×64×1 = 4096 → PCA ile 512'ye indir
+_EMBED_DIM   = 512         # çıkış embedding boyutu
+_MODEL_PATH  = Path(__file__).resolve().parents[3] / "best.pt"
+
+
+def _make_embedding(crop_bgr: np.ndarray) -> np.ndarray:
+    """
+    Kırpılmış yüz görüntüsünden 512-d L2-normalize embedding üret.
+
+    Yöntem:
+      1. Gri tonlamaya çevir
+      2. 64×64'e yeniden boyutlandır
+      3. Histogram eşitleme (CLAHE) → aydınlatma bağımsızlığı
+      4. 4096-d düzleştir
+      5. DCT tabanlı sıkıştırma → 512-d
+      6. L2-normalize
+    """
+    gray = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2GRAY)
+    resized = cv2.resize(gray, (_EMBED_SIZE, _EMBED_SIZE),
+                         interpolation=cv2.INTER_AREA)
+
+    # CLAHE: aydınlatma normalize
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(4, 4))
+    eq = clahe.apply(resized).astype(np.float32) / 255.0
+
+    # 2D DCT → frekans bileşenleri daha ayırt edici
+    dct = cv2.dct(eq)
+
+    # Düzleştir ve ilk 512 katsayıyı al
+    flat = dct.flatten()[:_EMBED_DIM]
+
+    # Pad (gerekirse)
+    if len(flat) < _EMBED_DIM:
+        flat = np.pad(flat, (0, _EMBED_DIM - len(flat)))
+
+    # L2-normalize
+    norm = np.linalg.norm(flat)
+    if norm > 1e-6:
+        flat = flat / norm
+
+    return flat.astype(np.float32)
 
 
 class FaceAnalyzer:
-    """InsightFace model yöneticisi ve embedding çıkarıcı."""
+    """
+    YOLO best.pt tabanlı yüz algılama + embedding üretici.
+    InsightFace'e bağımlılık yoktur.
+    """
 
-    def __init__(self, config: dict | AppConfig):
-        # Eğer AppConfig geldiyse face ayarlarını al
-        if isinstance(config, AppConfig):
-            self.cfg = config.face
+    def __init__(self, config=None):
+        from ultralytics import YOLO
+
+        if config is not None:
+            if hasattr(config, 'face'):
+                cfg = config.face
+            else:
+                cfg = config if isinstance(config, dict) else {}
         else:
-            self.cfg = config
-            
-        self.model_name = self.cfg.get('recognition_model', 'buffalo_l')
-        self.threshold = self.cfg.get('similarity_threshold', 0.45)
-        self.min_size = self.cfg.get('min_face_size', 30)
+            cfg = {}
 
-        # Modeli başlat
-        self.app = FaceAnalysis(
-            name=self.model_name,
-            root='models',
-            providers=['CUDAExecutionProvider', 'CPUExecutionProvider']
-        )
-        
-        # 640x640 algılama — kalite/hız dengesi
-        self._det_size = (640, 640)
-        self.app.prepare(ctx_id=0, det_size=self._det_size, det_thresh=0.5)
-        
-        # Frame küçültme: 0.75 = %44 daha hızlı, kalite yeterli
-        self._scale = 0.75
+        self.threshold = cfg.get('similarity_threshold', 0.60)
+        self.min_size  = cfg.get('min_face_size', 30)
+        self._conf     = cfg.get('det_conf', 0.40)
 
+        model_path = _MODEL_PATH
+        if not model_path.exists():
+            # Fallback: çalışma dizininde ara
+            fallback = Path("best.pt")
+            if fallback.exists():
+                model_path = fallback
+
+        self._yolo = YOLO(str(model_path))
+        self._yolo.overrides['verbose'] = False
+
+    # ── Algılama ─────────────────────────────────────────────────────────────
     def detect_faces(self, frame: np.ndarray) -> list[FaceResult]:
-        """Kameradan alınan bir kare (frame) içindeki tüm yüzleri algılar.
-        
+        """
+        Frame içindeki yüzleri/kişileri tespit et ve embedding üret.
+
         Args:
             frame: BGR formatında OpenCV görüntüsü
-        
         Returns:
-            list[FaceResult]: Algılanan yüzlerin listesi (bbox, embedding vb.)
+            list[FaceResult]
         """
-        import cv2
-        results = []
-        
-        # PERFORMANS: Frame'i küçült (algılama için)
-        h, w = frame.shape[:2]
-        small = cv2.resize(frame, (int(w * self._scale), int(h * self._scale)))
-        
-        # InsightFace'e küçültülmüş frame'i gönder
-        faces = self.app.get(small)
-        
-        # Ölçek faktörü (bbox'ları orijinal boyuta geri çevirmek için)
-        inv_scale = 1.0 / self._scale
-        
-        for face in faces:
-            # Sınırlayıcı kutu — orijinal frame boyutuna scale et
-            bbox = face.bbox.astype(float)
-            bbox = [int(bbox[0] * inv_scale), int(bbox[1] * inv_scale),
-                    int(bbox[2] * inv_scale), int(bbox[3] * inv_scale)]
-            
-            # Yüz genişliği veya yüksekliği min_size'dan küçükse yoksay
-            width = bbox[2] - bbox[0]
-            height = bbox[3] - bbox[1]
-            if width < self.min_size or height < self.min_size:
-                continue
-                
-            res = FaceResult(
-                bbox=bbox,
-                embedding=face.normed_embedding,
-                det_score=float(face.det_score),
-                age=int(face.age) if hasattr(face, 'age') else 0,
-                gender="M" if hasattr(face, 'gender') and face.gender == 1 else "F"
-            )
-            results.append(res)
-            
-        return results
+        results = self._yolo(frame, conf=self._conf, verbose=False)
+        face_results: list[FaceResult] = []
 
+        for r in results:
+            boxes = r.boxes
+            if boxes is None:
+                continue
+            for box in boxes:
+                x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
+                w = x2 - x1
+                h = y2 - y1
+                if w < self.min_size or h < self.min_size:
+                    continue
+
+                # Yüzü kırp
+                pad    = 8
+                cx1    = max(0, x1 - pad)
+                cy1    = max(0, y1 - pad)
+                cx2    = min(frame.shape[1], x2 + pad)
+                cy2    = min(frame.shape[0], y2 + pad)
+                crop   = frame[cy1:cy2, cx1:cx2]
+
+                if crop.size == 0:
+                    continue
+
+                emb = _make_embedding(crop)
+
+                face_results.append(FaceResult(
+                    bbox=[x1, y1, x2, y2],
+                    embedding=emb,
+                    det_score=float(box.conf[0]),
+                    age=0,
+                    gender="?"
+                ))
+
+        return face_results
+
+    # ── Tek fotoğraftan embedding ─────────────────────────────────────────────
     def extract_embedding(self, face_image: np.ndarray) -> np.ndarray | None:
-        """Kırpılmış tek bir yüz fotoğrafından embedding çıkarır.
-        Özellikle Aktif Arama (Mod 2) ve sabıkalı kaydı eklerken kullanılır.
-        
-        Args:
-            face_image: Yüzü içeren fotoğraf (BGR)
-            
-        Returns:
-            np.ndarray veya None (yüz bulunamazsa)
         """
-        faces = self.app.get(face_image)
+        Yüzü içeren bir fotoğraftan embedding çıkar.
+        Kişi ekleme sayfasında kullanılır.
+
+        Args:
+            face_image: BGR formatında tam fotoğraf (yüz kırpık olmak zorunda değil)
+        Returns:
+            512-d numpy array veya None
+        """
+        faces = self.detect_faces(face_image)
         if not faces:
             return None
-            
-        # Eğer birden fazla yüz varsa, merkeze en yakın olanı veya en büyüğünü seçebiliriz.
-        # Basitlik için en yüksek güven skoruna sahip olanı (genellikle ilk eleman) dönüyoruz.
-        return faces[0].normed_embedding
+        # En yüksek güven skoruna sahip yüzü seç
+        best = max(faces, key=lambda f: f.det_score)
+        return best.embedding
 
+    # ── Karşılaştırma ─────────────────────────────────────────────────────────
     def compare(self, emb1: np.ndarray, emb2: np.ndarray) -> float:
-        """İki yüz embedding'i arasındaki benzeliği ölçer (Cosine Similarity).
-        TÜM SİSTEMDE KARŞILAŞTIRMANIN YAPILDIĞI TEK NOKTA BURASIDIR.
-        
-        Args:
-            emb1: 1. yüz vektörü (512,)
-            emb2: 2. yüz vektörü (512,)
-            
-        Returns:
-            float: 0.0 - 1.0 arası benzerlik skoru
-        """
-        # Normed embedding oldukları için direkt dot product yapabiliriz
-        # Ancak güvenlik amaçlı yine de tam formülü uyguluyoruz
-        dot_product = np.dot(emb1, emb2)
-        norm_a = np.linalg.norm(emb1)
-        norm_b = np.linalg.norm(emb2)
-        
-        if norm_a == 0 or norm_b == 0:
+        """Cosine similarity (normed vektörler için dot product yeterli)."""
+        dot   = np.dot(emb1, emb2)
+        norm1 = np.linalg.norm(emb1)
+        norm2 = np.linalg.norm(emb2)
+        if norm1 < 1e-6 or norm2 < 1e-6:
             return 0.0
-            
-        similarity = dot_product / (norm_a * norm_b)
-        
-        # (-1, 1) aralığını kontrol et
-        return float(np.clip(similarity, -1.0, 1.0))
-        
-    def is_match(self, emb1: np.ndarray, emb2: np.ndarray, custom_threshold: float = None) -> bool:
-        """İki yüzün aynı kişiye ait olup olmadığını kontrol eder."""
+        return float(np.clip(dot / (norm1 * norm2), -1.0, 1.0))
+
+    def is_match(self, emb1: np.ndarray, emb2: np.ndarray,
+                 custom_threshold: float = None) -> bool:
         thresh = custom_threshold if custom_threshold is not None else self.threshold
         return self.compare(emb1, emb2) >= thresh

@@ -1,2 +1,4 @@
-"""SKYWATCH GUI — PyQt5 Arayüz"""
-# main_window, live_view, search_panel, register_panel
+"""SKYWATCH GUI Paketi"""
+from gui.main_window import launch_gui, MainWindow
+
+__all__ = ["launch_gui", "MainWindow"]

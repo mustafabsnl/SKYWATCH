@@ -37,9 +37,21 @@ face:
 
 # --- DeepSORT Tracking Ayarları ---
 tracking:
-  max_age: 10                            # Olu track hizla silinir (hayalet kutu onlemi)
-  min_hits: 2                            # Hizli onay (embedding kacirmamak icin)
-  iou_threshold: 0.4                     # Kalabalik sahneler icin IOU esigi
+  max_age: 10                            # Ölü track hızla silinir (hayalet kutu önlemi)
+  min_hits: 2                            # Hızlı onay (embedding kaçırmamak için)
+  iou_threshold: 0.4                     # Kalabalık sahneler için IOU eşiği
+
+  # --- ByteTrack — Lost Havuzu (Makale #1) ---
+  max_lost_age: 30                       # Kaybolan yüzü kaç frame bekle (1sn @30fps)
+
+  # --- GMC — Global Motion Compensation (Makale #1, #8, #12) ---
+  # Sabit kamera için kapalı (false). PTZ veya titrayan kamera için true yap.
+  gmc_enabled: false
+  gmc_min_movement_px: 1.0              # Bu px'den küçük kamera hareketi gürültü sayılır
+
+  # --- OC-SORT Velocity Consistency (Makale #1, #2) ---
+  # Hareket vektörü bu px'den fazla saptıysa eşleşme zayıf sayılır
+  velocity_epsilon: 15.0
 
 # --- Kameralar Arası Takip ---
 cross_camera:
