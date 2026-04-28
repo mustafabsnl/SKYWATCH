@@ -80,6 +80,10 @@ class Pipeline:
 
         # Re-ID eşiği — baz değer (dinamik olarak ayarlanır)
         self._base_reid_threshold = 0.50
+        # Yanlış pozitifleri azaltmak için daha sıkı eşik/ayrım
+        self._criminal_reid_min_threshold = 0.72
+        self._db_match_min_threshold = 0.78
+        self._db_match_min_margin = 0.04
 
         # ═══ Person ID: Sabit Kişi Numarası ═══
         # DeepSORT track_id değişir ama person_id aynı kalır
@@ -322,7 +326,13 @@ class Pipeline:
 
         for person_id, (seen_emb, seen_match, seen_info) in self._session_cache.items():
             score = self.face_analyzer.compare(embedding, seen_emb)
-            if score >= threshold and score > best_score:
+
+            # Suçlu eşleşmesini session cache'den geri kullanırken daha sıkı eşik uygula.
+            req_threshold = threshold
+            if seen_match is not None:
+                req_threshold = max(req_threshold, self._criminal_reid_min_threshold)
+
+            if score >= req_threshold and score > best_score:
                 best_score  = score
                 best_result = (seen_match, seen_info, person_id)
 
@@ -331,16 +341,28 @@ class Pipeline:
     # ──────────────────────────────────────────────────────────────────────
     def _search_in_db_cache(self, embedding: np.ndarray) -> MatchResult | None:
         """DB cache üzerinden embedding karşılaştırma."""
-        best_match = None
+        best_cid = None
         best_score = 0.0
+        second_score = 0.0
 
         for cid, db_emb in self._cached_embeddings:
             score = self.face_analyzer.compare(embedding, db_emb)
-            if score > self.face_analyzer.threshold and score > best_score:
+            if score > best_score:
+                second_score = best_score
                 best_score = score
-                best_match = MatchResult(criminal_id=cid, confidence=score)
+                best_cid = cid
+            elif score > second_score:
+                second_score = score
 
-        return best_match
+        # Genel threshold + ek güvenlik eşiği + top1/top2 ayrımı.
+        min_thr = max(self.face_analyzer.threshold, self._db_match_min_threshold)
+        if best_cid is None or best_score < min_thr:
+            return None
+
+        if (best_score - second_score) < self._db_match_min_margin:
+            return None
+
+        return MatchResult(criminal_id=best_cid, confidence=best_score)
 
     # ──────────────────────────────────────────────────────────────────────
     def _save_detection_screenshot(

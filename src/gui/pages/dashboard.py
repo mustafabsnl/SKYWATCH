@@ -9,9 +9,9 @@ import cv2
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QScrollArea, QFrame, QSizePolicy
+    QScrollArea, QFrame, QSizePolicy, QCheckBox, QPushButton
 )
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QPixmap, QImage, QFont, QColor, QPainter, QBrush
 
 from gui.styles.theme import (
@@ -50,7 +50,13 @@ class AlertItem(QWidget):
         lay.addWidget(tab)
 
         # ID badge
-        id_lbl = QLabel(f"T{track_id:03d}")
+        # track_id bazen string gelebilir (örn. pipeline/GUI veri akışı).
+        # Bu durumda formatlama hatası vermemesi için güvenli dönüştür.
+        try:
+            display_track_id = f"T{int(track_id):03d}"
+        except (TypeError, ValueError):
+            display_track_id = f"T{track_id}"
+        id_lbl = QLabel(display_track_id)
         id_lbl.setFont(QFont("Segoe UI Mono", 10, QFont.Weight.Bold))
         id_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         id_lbl.setFixedWidth(48)
@@ -132,20 +138,28 @@ class CameraFeed(QWidget):
         px  = QPixmap.fromImage(img).scaled(
             self._img.width(), self._img.height(),
             Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation
+            Qt.TransformationMode.FastTransformation
         )
         self._img.setPixmap(px)
 
     def set_pulse(self, v: bool):
         self._pulse.set_active(v)
 
+    def clear_frame(self):
+        self._img.setPixmap(QPixmap())
+        self._show_placeholder()
+
 
 # ── Dashboard Sayfası ─────────────────────────────────────────────────────────
 class DashboardPage(QWidget):
+    camera_selection_changed = pyqtSignal(list)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._alerts_widgets: list[AlertItem] = []
         self._alert_count = 0
+        self._camera_ids: list[str] = []
+        self._camera_checks: dict[str, QCheckBox] = {}
         self._build()
 
     def _build(self):
@@ -221,7 +235,53 @@ class DashboardPage(QWidget):
         rc.setContentsMargins(0, 0, 0, 0)
         rc.setSpacing(0)
 
-        # Başlık
+        # Kamera secim alani
+        cam_sel_hdr = QWidget()
+        cam_sel_hdr.setFixedHeight(56)
+        csh = QHBoxLayout(cam_sel_hdr)
+        csh.setContentsMargins(20, 0, 20, 0)
+        cam_sel_sec = SectionLabel("Kamera Seçimi")
+        csh.addWidget(cam_sel_sec)
+        csh.addStretch()
+        rc.addWidget(cam_sel_hdr)
+
+        cam_sel_wrap = QWidget()
+        cam_sel_l = QVBoxLayout(cam_sel_wrap)
+        cam_sel_l.setContentsMargins(20, 8, 20, 14)
+        cam_sel_l.setSpacing(8)
+
+        top_row = QHBoxLayout()
+        top_row.setContentsMargins(0, 0, 0, 0)
+        top_row.setSpacing(8)
+        self._btn_select_all = QPushButton("Tümünü Seç")
+        self._btn_select_all.setMinimumHeight(30)
+        self._btn_select_all.clicked.connect(self._select_all_cameras)
+        self._btn_clear_all = QPushButton("Temizle")
+        self._btn_clear_all.setMinimumHeight(30)
+        self._btn_clear_all.clicked.connect(self._clear_camera_selection)
+        top_row.addWidget(self._btn_select_all, 1)
+        top_row.addWidget(self._btn_clear_all, 1)
+        cam_sel_l.addLayout(top_row)
+
+        self._cam_check_wrap = QWidget()
+        self._cam_check_wrap.setStyleSheet("background: transparent;")
+        self._cam_check_lay = QVBoxLayout(self._cam_check_wrap)
+        self._cam_check_lay.setContentsMargins(0, 0, 0, 0)
+        self._cam_check_lay.setSpacing(6)
+        self._cam_check_lay.setAlignment(Qt.AlignmentFlag.AlignTop)
+
+        cam_scroll = QScrollArea()
+        cam_scroll.setWidgetResizable(True)
+        cam_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        cam_scroll.setMinimumHeight(120)
+        cam_scroll.setMaximumHeight(160)
+        cam_scroll.setWidget(self._cam_check_wrap)
+        cam_sel_l.addWidget(cam_scroll)
+
+        rc.addWidget(cam_sel_wrap)
+        rc.addWidget(Divider())
+
+        # Son tespitler basligi
         al_hdr = QWidget()
         al_hdr.setFixedHeight(56)
         ahl = QHBoxLayout(al_hdr)
@@ -282,6 +342,9 @@ class DashboardPage(QWidget):
     def update_frame(self, frame: np.ndarray):
         self._feed.update_frame(frame)
 
+    def clear_frame(self):
+        self._feed.clear_frame()
+
     def add_alert(self, track_id: int, status: str, name: str = ""):
         if self._empty_lbl.isVisible():
             self._empty_lbl.setVisible(False)
@@ -317,3 +380,50 @@ class DashboardPage(QWidget):
         self._alert_count = 0
         self._alert_count_lbl.setText("0")
         self._empty_lbl.setVisible(True)
+
+    def set_camera_options(self, camera_ids: list[str], selected_cameras: list[str] | None = None):
+        self._camera_ids = list(camera_ids or [])
+        while self._cam_check_lay.count():
+            item = self._cam_check_lay.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self._camera_checks.clear()
+
+        if not self._camera_ids:
+            empty = QLabel("— Kamera yok —")
+            empty.setStyleSheet(f"color: {TEXT_3};")
+            self._cam_check_lay.addWidget(empty)
+            return
+
+        selected = set(selected_cameras or [])
+        if not selected:
+            selected = {self._camera_ids[0]}
+
+        for idx, cam_id in enumerate(self._camera_ids):
+            chk = QCheckBox(f"Kamera {idx + 1} ({cam_id})")
+            chk.setChecked(cam_id in selected)
+            chk.toggled.connect(self._emit_camera_selection)
+            self._camera_checks[cam_id] = chk
+            self._cam_check_lay.addWidget(chk)
+
+        self._emit_camera_selection()
+
+    def _selected_camera_ids(self) -> list[str]:
+        return [cam_id for cam_id, chk in self._camera_checks.items() if chk.isChecked()]
+
+    def _emit_camera_selection(self):
+        self.camera_selection_changed.emit(self._selected_camera_ids())
+
+    def _select_all_cameras(self):
+        for chk in self._camera_checks.values():
+            chk.blockSignals(True)
+            chk.setChecked(True)
+            chk.blockSignals(False)
+        self._emit_camera_selection()
+
+    def _clear_camera_selection(self):
+        for chk in self._camera_checks.values():
+            chk.blockSignals(True)
+            chk.setChecked(False)
+            chk.blockSignals(False)
+        self._emit_camera_selection()

@@ -13,15 +13,28 @@ import numpy as np
 from utils.config import AppConfig
 from utils.logger import EventLogger, EventType
 
+# ── FPS Sınırlama Sabitleri ──────────────────────────────────────────────────
+# Grid ekranda 12 kamera için 15 FPS yeterli; detay ekranında 25 FPS.
+GRID_FPS   = 15
+DETAIL_FPS = 25
+_DEFAULT_FRAME_INTERVAL = 1.0 / GRID_FPS
+
 
 class CameraStream:
     """Tek bir kamera akışını bağımsız bir thread'de yönetir."""
 
-    def __init__(self, camera_id: str, source: str | int, name: str, logger: EventLogger):
+    class _NullLogger:
+        """Logger yoksa sessiz çalışmayı sağlar."""
+        def log(self, *a, **kw): pass
+        def error(self, *a, **kw): pass
+        def info(self, *a, **kw): pass
+        def debug(self, *a, **kw): pass
+
+    def __init__(self, camera_id: str, source: str | int, name: str, logger=None):
         self.camera_id = camera_id
         self.source = source
         self.name = name
-        self.logger = logger
+        self.logger = logger or self._NullLogger()
         
         self.cap = None
         self.is_running = False
@@ -39,9 +52,9 @@ class CameraStream:
         # Yeniden bağlanma süresi (sn)
         self.reconnect_delay = 5.0
         
-        # Frame okuma hızı (saniye cinsinden gecikme)
-        # _connect() çağrılınca kaynağa göre güncellenir
-        self._frame_delay = 0.033  # varsayılan ~30fps
+        # FPS sınırlama — hedef FPS ve frame aralığı
+        self._target_fps = GRID_FPS
+        self._frame_interval = 1.0 / self._target_fps
         
     def start(self):
         """Kamera akışını başlatır."""
@@ -61,6 +74,11 @@ class CameraStream:
         if self.cap:
             self.cap.release()
             self.cap = None
+
+    def set_target_fps(self, fps: int):
+        """Hedef FPS'i çalışma sırasında değiştirir (grid ↔ detay geçişi)."""
+        self._target_fps = fps
+        self._frame_interval = 1.0 / fps
             
     def get_frame(self) -> np.ndarray | None:
         """En son okunan kareyi thread-safe olarak döndürür."""
@@ -81,12 +99,15 @@ class CameraStream:
             # Performans için buffer boyutunu küçült
             self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
-            # Video dosyası mı? Native FPS'i al → frame_delay hesapla
+            # FPS sınırlama: Native FPS'i al ama TARGET_FPS'ten yüksek yapma
             src_fps = self.cap.get(cv2.CAP_PROP_FPS)
             if isinstance(self.source, str) and src_fps and 0 < src_fps <= 120:
-                self._frame_delay = 1.0 / src_fps
+                # Video dosyası: native FPS ile target FPS'in küçüğünü kullan
+                effective_fps = min(src_fps, self._target_fps)
             else:
-                self._frame_delay = 0.01  # Webcam: sadece CPU tasarrufu
+                # Webcam / RTSP: doğrudan target FPS'i uygula
+                effective_fps = self._target_fps
+            self._frame_interval = 1.0 / effective_fps
             
             self.logger.log(EventType.CAMERA_ONLINE, f"{self.name} bağlandı",
                             camera_id=self.camera_id)
@@ -134,8 +155,9 @@ class CameraStream:
                 self.frame_count = 0
                 self.start_time = now
 
-            # Native FPS'e göre bekle (video: 30fps → 33ms, webcam: 10ms)
-            sleep_t = self._frame_delay - (time.time() - t0)
+            # FPS sınırlama: frame_interval kadar geçmesi gereken süreyi hesapla
+            elapsed = time.time() - t0
+            sleep_t = self._frame_interval - elapsed
             if sleep_t > 0:
                 time.sleep(sleep_t)
 
@@ -143,13 +165,14 @@ class CameraStream:
 class CameraManager:
     """Tüm kameraları yöneten ana sınıf (TEK NOKTADAN OKUMA KURALI)."""
 
-    def __init__(self, config: AppConfig, logger: EventLogger):
+    def __init__(self, config: AppConfig = None, logger=None):
         self.config = config
         self.logger = logger
         self.streams: dict[str, CameraStream] = {}
         
-        # Config'deki tüm kameraları yükle
-        self._init_cameras()
+        # Config varsa kameraları yükle
+        if config is not None:
+            self._init_cameras()
         
     def _init_cameras(self):
         """Config dosyasındaki kameraları oluşturur ancak başlatmaz."""
@@ -217,3 +240,23 @@ class CameraManager:
             "fps": round(stream.fps, 1),
             "online": stream.cap is not None and stream.cap.isOpened()
         }
+
+    def set_all_target_fps(self, fps: int):
+        """Tüm kamera akışlarının hedef FPS'ini değiştirir."""
+        for stream in self.streams.values():
+            stream.set_target_fps(fps)
+
+    # ── Dinamik Kaynak Yönetimi ──────────────────────────────────────────
+    def add_source(self, cam_id: str, source: str | int, name: str = ""):
+        """Çalışma sırasında yeni kamera kaynağı ekler ve başlatır."""
+        if cam_id in self.streams:
+            return  # Zaten var
+        stream = CameraStream(cam_id, source, name or cam_id, self.logger)
+        self.streams[cam_id] = stream
+        stream.start()
+
+    def remove_source(self, cam_id: str):
+        """Kamera kaynağını durdurur ve kaldırır."""
+        if cam_id in self.streams:
+            self.streams[cam_id].stop()
+            del self.streams[cam_id]

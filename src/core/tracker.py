@@ -41,7 +41,7 @@ from core.models import FaceResult, Track
 # ──────────────────────────────────────────────────────────────────────────────
 _EMA_ALPHA    = 0.85   # Bbox EMA ağırlığı (1.0 = EMA yok, düşük = daha fazla yumuşatma)
 _VEL_EPSILON  = 15.0   # Velocity consistency eşiği (px/frame sapması)
-_MIN_CONF_EMB = 0.3    # Embedding eşleştirmesi için minimum detection skoru
+_MIN_CONF_EMB_DEFAULT = 0.18    # Embedding eşleştirmesi için minimum detection skoru
 
 
 class Tracker:
@@ -52,6 +52,7 @@ class Tracker:
         self.min_hits     = config.get("min_hits", 2)
         self.iou_threshold = config.get("iou_threshold", 0.4)
         self.max_lost_age = config.get("max_lost_age", 30)  # ByteTrack: Lost havuzunda kaç frame beklesin
+        self.min_conf_emb = float(config.get("min_conf_emb", _MIN_CONF_EMB_DEFAULT))
 
         # Kamera ID → DeepSort instance
         self._trackers: dict[str, DeepSort] = {}
@@ -122,7 +123,7 @@ class Tracker:
         det_embeddings = []
 
         for face in faces:
-            if face.det_score < _MIN_CONF_EMB:
+            if face.det_score < self.min_conf_emb:
                 continue  # Düşük güvenli tespitleri atla
 
             x1, y1, x2, y2 = face.bbox

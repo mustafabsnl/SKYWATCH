@@ -12,6 +12,7 @@ Movement  : MovementAnalyzer → davranış skoru
 Kullanım:
     python src/tools/video_test.py
     python src/tools/video_test.py --video Video1.webm --conf 0.35
+    python src/tools/video_test.py --cams CAM_01,CAM_02
 
 Kontroller:
     q / ESC  → Çıkış
@@ -20,6 +21,7 @@ Kontroller:
     +/-      → Confidence eşiğini artır/azalt
     r        → Başa sar + Tracker sıfırla
     f / b    → 10 saniye ileri / geri
+    n / p    → Sonraki / önceki video
     d        → Debug paneli aç/kapat
 """
 
@@ -78,6 +80,14 @@ _FACE_OK = False
 _db_embeddings = []   # [(criminal_id, np.ndarray)]
 _face_app      = None
 _SIMILARITY_THRESHOLD = 0.40
+
+
+def _load_video_sources() -> dict[str, str]:
+    try:
+        from video_sources import VIDEO_SOURCES
+        return dict(VIDEO_SOURCES)
+    except Exception:
+        return {}
 
 def _try_load_db_and_face():
     """InsightFace + DB'yi yüklemeyi dener. Başarısız olursa sadece tracking çalışır."""
@@ -447,29 +457,58 @@ def draw_debug_panel(frame, tracker, move_data):
 def main():
     parser = argparse.ArgumentParser(description="SKYWATCH — Video Test")
     parser.add_argument("--video",    default=str(PROJECT_ROOT/"Video.mp4"))
+    parser.add_argument("--cams",     default="",
+                        help="Virgulle ayrilmis kamera ID listesi (orn: CAM_01,CAM_02)")
     parser.add_argument("--model",    default=str(PROJECT_ROOT/"best.pt"))
     parser.add_argument("--conf",     type=float, default=0.35)
     parser.add_argument("--imgsz",    type=int,   default=320)  # 640→320: ~3x hızlı
     parser.add_argument("--device",   default="cpu")
+    parser.add_argument("--db-check", action="store_true",
+                        help="DB ile suclu kontrolunu aktif et (ilk adimda kapalidir)")
     parser.add_argument("--save",     action="store_true")
     parser.add_argument("--save-dir", default=str(PROJECT_ROOT/"logs"/"video_results"))
     args = parser.parse_args()
 
-    video_path = Path(args.video)
+    # ── Video listesi çözümleme (önce --cams, sonra --video) ───────────────
+    video_paths: list[Path] = []
+    if args.cams.strip():
+        src_map = _load_video_sources()
+        cam_ids = [c.strip() for c in args.cams.split(",") if c.strip()]
+        for cam_id in cam_ids:
+            src = src_map.get(cam_id)
+            if not src:
+                print(f"[!] Kamera kaynağı bulunamadı: {cam_id}")
+                continue
+            video_paths.append(Path(src))
+        if not video_paths:
+            print("[HATA] --cams verildi ama geçerli video kaynağı bulunamadı.")
+            sys.exit(1)
+    else:
+        video_paths = [Path(args.video)]
+
+    video_idx = 0
+    video_path = video_paths[video_idx]
     model_path = Path(args.model)
-    for p in [video_path, model_path]:
+    for p in [model_path]:
         if not p.exists():
             print(f"[HATA] Bulunamadı: {p}"); sys.exit(1)
+    for p in video_paths:
+        if not p.exists():
+            print(f"[HATA] Video bulunamadı: {p}")
+            sys.exit(1)
 
     print(f"\n{'='*60}")
     print(f"  SKYWATCH — Video Test")
     print(f"  Model : {model_path.name}  ({model_path.stat().st_size/1e6:.1f} MB)")
-    print(f"  Video : {video_path.name}")
+    print(f"  Video : {video_path.name}  (toplam {len(video_paths)} kaynak)")
     print(f"{'='*60}\n")
 
-    # ── DB + InsightFace ─────────────────────────────────────────────────────
-    print("[*] DB ve InsightFace yükleniyor...")
-    _try_load_db_and_face()
+    # ── DB + InsightFace (opsiyonel) ────────────────────────────────────────
+    if args.db_check:
+        print("[*] DB ve InsightFace yükleniyor...")
+        _try_load_db_and_face()
+    else:
+        print("[~] DB kontrolü kapalı (ilk adım: model + track). --db-check ile açılır.")
 
     # ── YOLO ─────────────────────────────────────────────────────────────────
     print("[*] YOLO modeli yükleniyor...")
@@ -485,16 +524,31 @@ def main():
         "direction_change_threshold": 90,
     }) if _CORE_OK else None
 
-    # ── Video ────────────────────────────────────────────────────────────────
-    cap = cv2.VideoCapture(str(video_path))
-    if not cap.isOpened():
-        print(f"[HATA] Video açılamadı"); sys.exit(1)
+    # ── Video açıcı ──────────────────────────────────────────────────────────
+    def _open_video(idx: int):
+        vp = video_paths[idx]
+        cp = cv2.VideoCapture(str(vp))
+        if not cp.isOpened():
+            return None, None
+        info = {
+            "path": vp,
+            "total_fr": int(cp.get(cv2.CAP_PROP_FRAME_COUNT)),
+            "fps_v": cp.get(cv2.CAP_PROP_FPS) or 25.0,
+            "vid_w": int(cp.get(cv2.CAP_PROP_FRAME_WIDTH)),
+            "vid_h": int(cp.get(cv2.CAP_PROP_FRAME_HEIGHT)),
+        }
+        return cp, info
 
-    total_fr = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    fps_v    = cap.get(cv2.CAP_PROP_FPS) or 25.0
-    vid_w    = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    vid_h    = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    print(f"[✓] Video: {vid_w}x{vid_h} | {fps_v:.1f}fps | {fmt_time(total_fr/fps_v)} | {total_fr} kare\n")
+    cap, vinfo = _open_video(video_idx)
+    if cap is None:
+        print("[HATA] İlk video açılamadı.")
+        sys.exit(1)
+
+    total_fr = vinfo["total_fr"]
+    fps_v    = vinfo["fps_v"]
+    vid_w    = vinfo["vid_w"]
+    vid_h    = vinfo["vid_h"]
+    print(f"[✓] Video: {video_path.name} | {vid_w}x{vid_h} | {fps_v:.1f}fps | {fmt_time(total_fr/fps_v)} | {total_fr} kare\n")
     print("[*] Oynatma başlıyor...\n")
 
     # ── Pencere boyutu (portrait-aware, max 650px yüksek) ────────────────────
@@ -555,10 +609,25 @@ def main():
             if not paused:
                 ret, raw = cap.read()
                 if not ret:
-                    print("\n[✓] Video bitti. Başa sarılıyor...")
-                    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                    frame_cnt = 0; paused = True
-                    if display is None: continue
+                    # Birden fazla video varsa sonraki kaynağa geç
+                    if len(video_paths) > 1:
+                        video_idx = (video_idx + 1) % len(video_paths)
+                        video_path = video_paths[video_idx]
+                        cap.release()
+                        cap, vinfo = _open_video(video_idx)
+                        if cap is None:
+                            print(f"[!] Video açılamadı: {video_path.name}")
+                            continue
+                        total_fr = vinfo["total_fr"]; fps_v = vinfo["fps_v"]
+                        vid_w = vinfo["vid_w"]; vid_h = vinfo["vid_h"]
+                        frame_cnt = 0
+                        print(f"\n[~] Sonraki video: {video_path.name}")
+                        continue
+                    else:
+                        print("\n[✓] Video bitti. Başa sarılıyor...")
+                        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                        frame_cnt = 0; paused = True
+                        if display is None: continue
                 else:
                     frame_cnt      += 1
                     fps_fc         += 1
@@ -728,6 +797,8 @@ def main():
                 draw_debug_panel(frame, tracker, move_data)
 
             draw_progress(frame, cur_p, total_fr, fps_v)
+            cv2.putText(frame, f"Kaynak: {video_path.name} ({video_idx+1}/{len(video_paths)})",
+                        (12, 24), _FONT, 0.48, (0, 180, 255), 2, cv2.LINE_AA)
 
             # WANTED banner
             if any(v.get("status") == "WANTED" for v in track_status.values()):
@@ -778,6 +849,26 @@ def main():
                 p2 = max(cur_p - int(fps_v*10), 0)
                 cap.set(cv2.CAP_PROP_POS_FRAMES, p2)
                 print(f"[~] -10sn → {fmt_time(p2/fps_v)}")
+            elif key == ord('n') and len(video_paths) > 1:
+                video_idx = (video_idx + 1) % len(video_paths)
+                video_path = video_paths[video_idx]
+                cap.release()
+                cap, vinfo = _open_video(video_idx)
+                if cap is not None:
+                    total_fr = vinfo["total_fr"]; fps_v = vinfo["fps_v"]
+                    vid_w = vinfo["vid_w"]; vid_h = vinfo["vid_h"]
+                    frame_cnt = 0
+                    print(f"[~] Sonraki video: {video_path.name}")
+            elif key == ord('p') and len(video_paths) > 1:
+                video_idx = (video_idx - 1) % len(video_paths)
+                video_path = video_paths[video_idx]
+                cap.release()
+                cap, vinfo = _open_video(video_idx)
+                if cap is not None:
+                    total_fr = vinfo["total_fr"]; fps_v = vinfo["fps_v"]
+                    vid_w = vinfo["vid_w"]; vid_h = vinfo["vid_h"]
+                    frame_cnt = 0
+                    print(f"[~] Önceki video: {video_path.name}")
 
     except KeyboardInterrupt:
         print("\n[*] Durduruldu.")

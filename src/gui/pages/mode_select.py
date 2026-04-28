@@ -296,13 +296,29 @@ class ModePage(QWidget):
             if i.widget():
                 i.widget().deleteLater()
         self._cams.clear()
+        cameras = []
+
+        # 1) Test video kaynak dosyasi varsa onu kullan
         try:
-            import yaml
-            with open(PROJECT_ROOT / "config" / "config.yaml", encoding="utf-8") as f:
-                cfg = yaml.safe_load(f)
-            cameras = cfg.get("cameras", []) or [{"id": "CAM_0", "name": "Kamera 1"}]
+            from video_sources import VIDEO_SOURCES, CAMERA_LABELS
+            for cam_id in VIDEO_SOURCES.keys():
+                cameras.append({
+                    "id": cam_id,
+                    "name": CAMERA_LABELS.get(cam_id, cam_id),
+                })
         except Exception:
-            cameras = [{"id": "CAM_0", "name": "Kamera 1"}]
+            cameras = []
+
+        # 2) Yoksa config.yaml kameralarina dus
+        if not cameras:
+            try:
+                import yaml
+                with open(PROJECT_ROOT / "config" / "config.yaml", encoding="utf-8") as f:
+                    cfg = yaml.safe_load(f)
+                cameras = cfg.get("cameras", []) or [{"id": "CAM_0", "name": "Kamera 1"}]
+            except Exception:
+                cameras = [{"id": "CAM_0", "name": "Kamera 1"}]
+
         for c in cameras:
             row = CamRow(c.get("id", "CAM"), c.get("name", "Kamera"))
             self._cams.append(row)
@@ -363,3 +379,8 @@ class ModePage(QWidget):
 
     def refresh_persons(self):
         self._load_persons()
+
+    def get_camera_ids(self, only_checked: bool = False) -> list[str]:
+        if only_checked:
+            return [c.cam_id for c in self._cams if c.is_checked()]
+        return [c.cam_id for c in self._cams]

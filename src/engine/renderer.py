@@ -25,11 +25,6 @@ STATUS_LABELS: dict[str, str] = {
     "UNKNOWN":    "?",
 }
 
-# Track kutularini daha net gostermek icin ana renk/kalinlik
-TRACK_BOX_COLOR = (0, 0, 255)   # Kirmizi (BGR)
-TRACK_BOX_THICKNESS = 4
-
-
 class OverlayRenderer:
     """Frame'e tespit sonuclarini cizer."""
 
@@ -53,12 +48,11 @@ class OverlayRenderer:
             x1, y1, x2, y2 = r.bbox
             is_threat = r.status in ("WANTED", "CRIMINAL")
 
-            # Kutu: her track icin belirgin kirmizi ana cerceve + durum rengi ic cerceve
-            box_thick = 3 if is_threat else 2
-            cv2.rectangle(display, (x1, y1), (x2, y2), TRACK_BOX_COLOR, TRACK_BOX_THICKNESS)
+            # Tek kutu cizimi (cift kutu gorunumu kaldirildi)
+            box_thick = 4 if is_threat else 3
             if r.status == "WANTED" and blink:
                 cv2.rectangle(display, (x1-3, y1-3), (x2+3, y2+3), (0, 0, 255), 4)
-            cv2.rectangle(display, (x1 + 1, y1 + 1), (x2 - 1, y2 - 1), color, box_thick)
+            cv2.rectangle(display, (x1, y1), (x2, y2), color, box_thick)
 
             # Ust etiket — Person ID varsa onu göster
             display_id = r.global_id if r.global_id else f"ID:{r.track_id}"
