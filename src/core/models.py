@@ -63,6 +63,8 @@ class Track:
     # OC-SORT Velocity Consistency (Makale #2)
     # False → bu frame'de hız vektörü anormal sapma gösterdi (potansiyel yanlış eşleşme)
     velocity_ok: bool = True
+    source: str = "deepsort"
+    prediction_age_sec: float = 0.0
 
 
 @dataclass

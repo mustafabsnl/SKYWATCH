@@ -43,6 +43,26 @@ class EventLogger:
 
         # Olay callback'leri (GUI için)
         self._callbacks: list[callable] = []
+        self._run_logger = None
+
+    def set_run_logger(self, run_logger):
+        """RunLogger köprüsü ekler; EventLogger loglarını run klasörüne yansıtır."""
+        self._run_logger = run_logger
+
+    def _mirror_event(self, event_type: str, message: str, level: str = "INFO", **fields):
+        if self._run_logger is None:
+            return
+        try:
+            self._run_logger.log_event(
+                event_type,
+                message,
+                level=level,
+                source="EventLogger",
+                **fields,
+            )
+        except Exception:
+            # EventLogger'ın ana akışını log köprüsü yüzünden bozma
+            pass
 
     def _setup_logger(self) -> logging.Logger:
         """Python logging yapılandırması."""
@@ -96,10 +116,13 @@ class EventLogger:
         # Seviyeye göre logla
         if event_type in (EventType.WANTED_FOUND, EventType.CRIMINAL_DETECTED):
             self._logger.warning(full_msg)
+            level = "WARNING"
         elif event_type in (EventType.CAMERA_OFFLINE,):
             self._logger.error(full_msg)
+            level = "ERROR"
         else:
             self._logger.info(full_msg)
+            level = "INFO"
 
         # Callback'leri çağır (GUI güncellemesi için)
         event_data = {
@@ -113,6 +136,10 @@ class EventLogger:
                 callback(event_data)
             except Exception as e:
                 self._logger.error(f"Callback hatası: {e}")
+                if self._run_logger is not None:
+                    self._run_logger.log_error("event_callback_error", e, event_type=event_type.value)
+
+        self._mirror_event(event_type.value, message, level=level, **kwargs)
 
     def on_event(self, callback: callable):
         """Olay dinleyici ekle (GUI için).
@@ -125,15 +152,19 @@ class EventLogger:
     def info(self, message: str):
         """Genel bilgi logu."""
         self._logger.info(message)
+        self._mirror_event("INFO", message, level="INFO")
 
     def warning(self, message: str):
         """Uyarı logu."""
         self._logger.warning(message)
+        self._mirror_event("WARNING", message, level="WARNING")
 
     def error(self, message: str):
         """Hata logu."""
         self._logger.error(message)
+        self._mirror_event("ERROR", message, level="ERROR")
 
     def debug(self, message: str):
         """Debug logu."""
         self._logger.debug(message)
+        self._mirror_event("DEBUG", message, level="DEBUG")

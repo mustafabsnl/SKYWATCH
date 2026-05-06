@@ -1,138 +1,76 @@
-# ══════════════════════════════════════════════════════
-# SKYWATCH .gitignore — v3.0.0
-# GitHub'a sadece KOD gider, veri/model/çıktı GITMEZ
-# ══════════════════════════════════════════════════════
+# SKYWATCH - minimal/prod .gitignore
 
-# ── ultralytics_skywatch: Kaggle'da kaggle_setup.py ile patch ediliyor ──
-# Bu klasöre artık gerek yok — tamamen dışarda bırak
-ultralytics_skywatch/
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+.eggs/
+build/
+dist/
 
-# ── Veri Setleri (GB boyutunda) ──────────────────────
-VeriSeti/
-dataset_yolo/
-data/
-datasets/
-*.zip
-*.tar.gz
-*.tar
-*.7z
+# Virtual env
+venv/
+.venv/
+env/
+ENV/
+.env
 
-# ── Yerel Archive Dataset ────────────────────────────
-# Kaggle'da kagglehub ile indirilir — GitHub'a GITMEZ
-archive/
+# IDE / OS
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+desktop.ini
 
-# ── WIDER FACE Orijinal Dataset (ham hali) ──────────
-Kalabalık_yuz_veri_seti/
+# Runtime outputs
+logs/
+*.log
+tmp/
+.cache/
 
-# ── WIDER FACE → YOLO Dönüştürülmüş Dataset ─────────
-# wider_to_yolo.py ile oluşturulur — GitHub'a GITMEZ (GB boyutunda)
-skywatch_wider/
+# Local database / user assets
+database/skywatch.db
+database/photos/
 
-# analyze_dataset.py'nin ürettiği data.yaml (lokal path içerir)
-# Kaggle'da train_skywatch_kaggle.py tarafından dinamik oluşturulur
-archive/data.yaml
-
-# ── Model Ağırlıkları ─────────────────────────────────
-/models/                    # Sadece kök /models/ klasörü (trained weights)
-# NOT: src/ultralytics_patch/cfg/models/ → KOD, gitignore'dan muaf
-#*.pt
+# Models / checkpoints
+models/
+checkpoints/
 *.pth
 *.onnx
 *.engine
 *.tflite
 *.torchscript
-checkpoints/
 
-# ── Kaggle Eğitim + Snapshot Çıktıları ───────────────
-# Kaggle /kaggle/working/ altında üretilir — repoya GITMEZ
+# Training / experiment outputs
 runs/
 wandb/
-snapshot_epoch_*.zip
-skywatch_det_*.zip
-skywatch_data/
-
-# ── Ultralytics / Python Önbelleği ───────────────────
-__pycache__/
-*.py[cod]
-*.pyo
-*.pyd
-.Python
-*.egg-info/
-dist/
-build/
-*.egg
-.eggs/
-pip-log.txt
-
-# ── Sanal Ortam ───────────────────────────────────────
-venv/
-env/
-.env
-.venv/
-ENV/
-
-# ── Jupyter / Kaggle Notebook ─────────────────────────
-.ipynb_checkpoints/
-*.ipynb
-
-# ── Veritabanı ve Kişisel Veriler ────────────────────
-database/skywatch.db
-database/photos/
-logs/
-*.log
-
-# ── Ekran Görüntüleri / Video / Büyük Binary ─────────
-logs/detections/
-*.webm
-*.mp4
-*.avi
-*.mov
-# Rapor belgesi (büyük binary, git'te taşımak yoğundur)
-SKYWATCH_RAPOR.docx
-
-# ── IDE ───────────────────────────────────────────────
-.vscode/
-.idea/
-*.swp
-*.swo
-*.sublime-project
-*.sublime-workspace
-
-# ── OS ────────────────────────────────────────────────
-.DS_Store
-.DS_Store?
-._*
-.Spotlight-V100
-.Trashes
-Thumbs.db
-ehthumbs.db
-desktop.ini
-
-# ── Geçici Dosyalar ───────────────────────────────────
-*.tmp
-*.bak
-*.orig
-*.rej
-.cache/
-tmp/
-
-# ── ultralytics_skywatch — Derleme Artıkları ─────────
-# (Klasörün tamamı zaten yukarıda dışlandı)
-ultralytics_skywatch/**/__pycache__/
-ultralytics_skywatch/**/*.pyc
-ultralytics_skywatch/**/*.egg-info/
-ultralytics_skywatch/build/
-ultralytics_skywatch/dist/
-
-# ── Yerel Eğitim Çıktıları ───────────────────────────
 src/model/runs/
 
-# ═══════════════════════════════════════════════════════
-# GitHub'a GİDEN DOSYALAR ✅ (bu satırlar yorum, kural değil)
-# ═══════════════════════════════════════════════════════
-# src/ultralytics_patch/          ← Custom modül kodu (C2f_CAM, FRM, YAML)
-# src/model/                      ← Eğitim scriptleri, loss, trainer
-# kaggle_setup.py                 ← Kaggle patch scripti
-# kaggle_training_50epoch.py      ← Kaggle notebook başlatıcı
-# requirements.txt                ← Bağımlılıklar
-# README.md / KAGGLE_GUIDE.md    ← Dokümantasyon
+# Datasets and archives
+VeriSeti/
+dataset_yolo/
+data/
+datasets/
+archive/
+Kalabalık_yuz_veri_seti/
+skywatch_wider/
+*.zip
+*.tar
+*.tar.gz
+*.7z
+
+# Local camera/video assets (DO NOT push)
+Kameralar/
+*.mp4
+*.webm
+*.avi
+*.mov
+
+# Local extras
+ultralytics_skywatch/
+tools/__pycache__/
+SKYWATCH_RAPOR.docx

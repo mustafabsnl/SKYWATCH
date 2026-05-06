@@ -17,7 +17,11 @@ class DecisionEngine:
             "CRIMINAL": (0, 204, 255),   # Sarı/Turuncu
             "WANTED": (0, 0, 255),       # Kırmızı
             "SUSPICIOUS": (255, 0, 255), # Mor (hızlı/şüpheli hareket)
-            "UNKNOWN": (200, 200, 200)   # Gri
+            "UNKNOWN": (200, 200, 200),  # Gri
+            "FACE": (0, 220, 220),
+            "TENTATIVE": (180, 180, 0),
+            "PREDICTED": (120, 180, 255),
+            "TRACKING": (180, 180, 0),
         }
 
     def evaluate(self, track: Track, criminal_info: dict | None = None) -> DecisionResult:
@@ -36,6 +40,27 @@ class DecisionEngine:
         status      = "CLEAN"
         danger_level = "LOW"
         color       = self.colors["CLEAN"]
+        if not track.is_confirmed:
+            if track.source == "predicted":
+                status = "PREDICTED"
+                color = self.colors["PREDICTED"]
+            elif track.source == "raw_fallback":
+                status = "FACE"
+                color = self.colors["FACE"]
+            else:
+                status = "TRACKING"
+                color = self.colors["TRACKING"]
+            return DecisionResult(
+                track_id=track.track_id,
+                bbox=track.bbox.copy(),
+                status=status,
+                danger_level="LOW",
+                color=color,
+                criminal_id=None,
+                confidence=0.0,
+                behavior_label=track.movement.behavior_label,
+                global_id=track.global_id
+            )
         
         # 1. Sabıka Veritabanı Eşleşmesi Öncelikli
         if track.criminal_match is not None and criminal_info is not None:

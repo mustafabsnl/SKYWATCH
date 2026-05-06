@@ -27,15 +27,15 @@ class MovementAnalyzer:
         self.dwell_threshold      = config.get("dwell_time_threshold", 120)
         self.direction_threshold  = config.get("direction_change_threshold", 90)
 
-        # Track ID → position geçmişi (cx, cy, timestamp)
-        self._history: dict[int, deque] = {}
+        # (camera_id, track_id) → position geçmişi (cx, cy, timestamp)
+        self._history: dict[tuple[str, int], deque] = {}
         self._max_history = 90  # Max 90 frame (~3 sn @ 30fps)
 
-        # Track ID → ilk görülme zamanı (bekleme süresi hesabı)
-        self._first_seen: dict[int, float] = {}
+        # (camera_id, track_id) → ilk görülme zamanı (bekleme süresi hesabı)
+        self._first_seen: dict[tuple[str, int], float] = {}
 
-        # Track ID → son 5 frame hız vektörü (OC-SORT Velocity Consistency için)
-        self._velocity_history: dict[int, deque] = {}
+        # (camera_id, track_id) → son 5 frame hız vektörü
+        self._velocity_history: dict[tuple[str, int], deque] = {}
 
     # ──────────────────────────────────────────────────────────
     def analyze(self, track: Track) -> MovementReport:
@@ -49,6 +49,8 @@ class MovementAnalyzer:
             MovementReport: Hız, yön, davranış skoru
         """
         tid = track.track_id
+        cam_id = track.camera_id or "UNKNOWN"
+        key = (cam_id, tid)
         now = time.time()
 
         # Merkez nokta
@@ -56,13 +58,13 @@ class MovementAnalyzer:
         cy = (track.bbox[1] + track.bbox[3]) / 2
 
         # Geçmiş oluştur
-        if tid not in self._history:
-            self._history[tid]          = deque(maxlen=self._max_history)
-            self._velocity_history[tid] = deque(maxlen=5)
-            self._first_seen[tid]       = now
+        if key not in self._history:
+            self._history[key]          = deque(maxlen=self._max_history)
+            self._velocity_history[key] = deque(maxlen=5)
+            self._first_seen[key]       = now
 
-        self._history[tid].append((cx, cy, now))
-        history = self._history[tid]
+        self._history[key].append((cx, cy, now))
+        history = self._history[key]
 
         # ── Hız Hesaplama ──────────────────────────────────────
         speed     = 0.0
@@ -77,7 +79,7 @@ class MovementAnalyzer:
             speed   = math.sqrt(dx_inst ** 2 + dy_inst ** 2)
 
             # Velocity history güncelle (OC-SORT için)
-            self._velocity_history[tid].append((dx_inst, dy_inst))
+            self._velocity_history[key].append((dx_inst, dy_inst))
 
             # Ortalama hız (son 30 kare)
             window     = min(len(history), 30)
@@ -97,11 +99,11 @@ class MovementAnalyzer:
             )
 
         # ── Bekleme Süresi ────────────────────────────────────
-        dwell_time = now - self._first_seen.get(tid, now)
+        dwell_time = now - self._first_seen.get(key, now)
 
         # Kişi hareket ediyorsa bekleme sayılmaz
         if avg_speed > self.speed_fast:
-            self._first_seen[tid] = now
+            self._first_seen[key] = now
             dwell_time = 0.0
 
         # ── Rota ──────────────────────────────────────────────
@@ -175,7 +177,7 @@ class MovementAnalyzer:
         return report
 
     # ──────────────────────────────────────────────────────────
-    def get_velocity_vector(self, track_id: int) -> tuple[float, float]:
+    def get_velocity_vector(self, camera_id: str, track_id: int) -> tuple[float, float]:
         """
         Track'in son 5 frame ortalamasına göre hız vektörünü döndürür.
         OC-SORT Velocity Consistency için Pipeline/Tracker tarafından kullanılır.
@@ -183,7 +185,7 @@ class MovementAnalyzer:
         Returns:
             (vx, vy): Piksel/frame cinsinden ortalama hız vektörü
         """
-        hist = self._velocity_history.get(track_id)
+        hist = self._velocity_history.get((camera_id, track_id))
         if not hist or len(hist) == 0:
             return (0.0, 0.0)
 
@@ -192,10 +194,16 @@ class MovementAnalyzer:
         return (vx, vy)
 
     # ──────────────────────────────────────────────────────────
-    def cleanup(self, active_track_ids: set[int]):
+    def cleanup(self, active_track_keys: set[tuple[str, int]], camera_id: str | None = None):
         """Artık takip edilmeyen track'lerin geçmişini temizle."""
-        dead = [tid for tid in self._history if tid not in active_track_ids]
-        for tid in dead:
-            self._history.pop(tid, None)
-            self._first_seen.pop(tid, None)
-            self._velocity_history.pop(tid, None)
+        if camera_id is not None:
+            dead = [
+                key for key in self._history
+                if key[0] == camera_id and key not in active_track_keys
+            ]
+        else:
+            dead = [key for key in self._history if key not in active_track_keys]
+        for key in dead:
+            self._history.pop(key, None)
+            self._first_seen.pop(key, None)
+            self._velocity_history.pop(key, None)

@@ -5,20 +5,71 @@
 
 # --- Kamera Ayarları ---
 cameras:
-  - id: "CAM_01"
-    name: "Ana Giriş"
-    source: 0    # 0 = laptop kamerası (webcam)
-    location: "Bina A — Giriş"
-    region: "BOLGE_A"
-    neighbors: []
-
-  # Yeni kamera eklemek için aşağıdaki şablonu kopyala:
-  # - id: "CAM_02"
-  #   name: "Koridor"
-  #   source: "rtsp://192.168.1.100:554/stream"
-  #   location: "Bina A — Koridor"
-  #   region: "BOLGE_A"
-  #   neighbors: ["CAM_01"]
+  max_active_cameras: 2
+  layout:
+    rows: 1
+    cols: 2
+  items:
+    - id: "CAM_01"
+      name: "Kamera 1"
+      source: 0
+      enabled: true
+      location: "Bina A — Giriş"
+      region: "BOLGE_A"
+      neighbors: ["CAM_03"]
+    - id: "CAM_02"
+      name: "Kamera 2"
+      source: 1
+      enabled: false
+      location: "Bina A — Koridor"
+      region: "BOLGE_A"
+      neighbors: ["CAM_01"]
+    - id: "CAM_03"
+      name: "Kamera 3"
+      source: 2
+      enabled: true
+      location: "Bina A — Dış Kapı"
+      region: "BOLGE_A"
+      neighbors: ["CAM_01"]
+    - id: "CAM_04"
+      name: "Kamera 4"
+      source: 3
+      enabled: false
+      location: "Bina A — Otopark"
+      region: "BOLGE_A"
+      neighbors: ["CAM_03"]
+    - id: "CAM_05"
+      name: "Kamera 5"
+      source: 4
+      enabled: false
+    - id: "CAM_06"
+      name: "Kamera 6"
+      source: 5
+      enabled: false
+    - id: "CAM_07"
+      name: "Kamera 7"
+      source: 6
+      enabled: false
+    - id: "CAM_08"
+      name: "Kamera 8"
+      source: 7
+      enabled: false
+    - id: "CAM_09"
+      name: "Kamera 9"
+      source: 8
+      enabled: false
+    - id: "CAM_10"
+      name: "Kamera 10"
+      source: 9
+      enabled: false
+    - id: "CAM_11"
+      name: "Kamera 11"
+      source: 10
+      enabled: false
+    - id: "CAM_12"
+      name: "Kamera 12"
+      source: 11
+      enabled: false
 
 # --- Bölge Tanımları ---
 regions:
@@ -37,9 +88,45 @@ face:
 
 # --- DeepSORT Tracking Ayarları ---
 tracking:
-  max_age: 10                            # Ölü track hızla silinir (hayalet kutu önlemi)
-  min_hits: 2                            # Hızlı onay (embedding kaçırmamak için)
-  iou_threshold: 0.4                     # Kalabalık sahneler için IOU eşiği
+  max_age: 10                            # Eski track daha hızlı düşsün (predicted yüklemesini azaltır)
+  min_hits: 1                            # Tentative trackler hızlı görünür
+  iou_threshold: 0.3                     # Kalabalık sahneler için IOU eşiği
+  draw_tentative_tracks: true
+
+  # --- BBox Prediction (kayıp frame için kısa ömürlü tahmin) ---
+  bbox_prediction_enabled: true
+  prediction_render_enabled: false      # Prediction state tutulur; production overlay'e girmez
+  prediction_update_existing_bbox: true
+  max_prediction_gap_sec: 0.20          # 0.20 sn'den uzun süre tahmin yok
+  max_prediction_missed_frames: 2        # 2 ardışık miss sonrası tahmin durur
+  keep_lost_tracks_for_sec: 0.55         # Lost state kısa süre hafızada kalsın (reacquire için)
+
+  bbox_prediction_max_velocity_px_per_sec: 1200  # Daha kısıtlı hız → çok uzaktaki tahminler iptal
+  bbox_prediction_max_shift_px: 160              # Tek tahminde max kayma
+  velocity_smoothing_alpha: 0.85                 # Hız EMA: yeni ölçüme biraz daha az ağırlık
+
+  # Predicted track confidence decay (decay altındaysa çizilmez)
+  predicted_min_confidence: 0.40
+  local_tracker_enabled: true
+  local_tracker_method: "klt"
+  local_tracker_max_points: 40
+  local_tracker_quality: 0.01
+  local_tracker_min_distance: 4
+  local_tracker_min_points: 6
+  local_tracker_max_lost_frames: 3
+  local_tracker_max_shift_px: 80
+  local_tracker_reinit_on_detection: true
+  detection_snap_alpha: 1.0
+
+  # --- Re-acquire (lost → live geri dönüş) ---
+  reacquire_iou_threshold: 0.15
+  reacquire_center_distance_px: 120
+  reacquire_time_window_sec: 0.6
+  reacquire_min_score: 0.4
+
+  # --- No-embedding fallback (yüz var ama embedding üretilemedi) ---
+  allow_no_embedding_fallback: true
+  no_embedding_fallback_mode: "iou"
 
   # --- ByteTrack — Lost Havuzu (Makale #1) ---
   max_lost_age: 30                       # Kaybolan yüzü kaç frame bekle (1sn @30fps)
@@ -73,7 +160,7 @@ database:
 
 # --- Aktif Arama ---
 search:
-  max_concurrent_cameras: 4
+  max_concurrent_cameras: 2
   timeout_minutes: 30
   auto_expand_neighbors: true            # Bulunduğunda komşu kameraları tara
 
@@ -83,8 +170,94 @@ logging:
   log_file: "logs/events.log"
   save_detection_screenshots: true
   screenshot_dir: "logs/detections/"
+  run_logs_dir: "logs/runs/"
+  enable_run_logging: true
+  perf_log_interval_sec: 1.0
+  camera_log_interval_sec: 2.0
+  async_logging: true
+  keep_last_runs: 30
 
 # --- Bildirim ---
 notifications:
   sound_alarm: true
   popup_alert: true
+
+# --- GPU ---
+gpu:
+  enabled: true
+  device: "cuda:0"
+  require_cuda: true
+  allow_cpu_fallback: false
+  log_device_info: true
+  insightface_providers:
+    - "CUDAExecutionProvider"
+    - "CPUExecutionProvider"
+
+# --- Performans ---
+performance:
+  max_active_cameras: 2
+  max_queue_size: 2
+  process_every_n_frames: 1
+  show_fps: true
+  no_signal_placeholder: true
+  display_fps: 30
+  display_fps_cpu: 12
+  display_fps_gpu: 30
+  inference_fps_total: 4
+  inference_fps_total_cpu: 12
+  inference_fps_total_gpu: 8
+  max_proc_width_single: 640
+  max_proc_width_2cam: 512
+  max_proc_width_4cam: 416
+  max_proc_width_single_cpu: 512
+  max_proc_width_2cam_cpu: 416
+  max_proc_width_4cam_cpu: 416
+  max_proc_width_single_gpu: 768
+  max_proc_width_2cam_gpu: 640
+  max_proc_width_4cam_gpu: 512
+  detect_every_n_1cam_cpu: 1
+  detect_every_n_2cam_cpu: 1
+  detect_every_n_4cam_cpu: 2
+  detect_every_n_1cam_gpu: 1
+  detect_every_n_2cam_gpu: 1
+  detect_every_n_4cam_gpu: 1
+  db_check_interval_1cam_cpu: 8
+  db_check_interval_2cam_cpu: 10
+  db_check_interval_4cam_cpu: 15
+  db_check_interval_1cam_gpu: 6
+  db_check_interval_2cam_gpu: 8
+  db_check_interval_4cam_gpu: 10
+  decision_ttl_sec: 2.5
+  stale_decision_fade_sec: 4.0
+  decouple_display_inference: true
+  display_source_max_width: 1280
+  display_source_max_height: 720
+  display_canvas_width: 1280
+  display_canvas_height: 720
+  display_single_max_width: 1280
+  camera_target_fps: 30
+  camera_target_fps_cpu: 12
+  camera_target_fps_gpu: 30
+  video_file_realtime: true
+  video_file_loop: true
+  drop_old_frames: true
+
+# --- Debug ---
+debug:
+  draw_raw_yolo_boxes: false             # Production: false → final decision dışında raw YOLO çizilmez
+  raw_detection_fallback_enabled: true   # Tracker hiç track üretmediyse fallback olarak raw face kutusu çiz
+  draw_tentative_tracks: true
+  draw_predicted_tracks: false           # Production: predicted kutuları çizime sokma
+  max_predicted_tracks_per_camera: 1     # Aynı kamerada maksimum kaç PREDICTED kutu çizilebilir
+  overlay_dedup_enabled: true            # Final decisions çizilmeden önce öncelik tabanlı NMS
+  overlay_dedup_iou: 0.45                # Duplicate overlay eşik değeri
+  predicted_label_text: "TRACKING"       # Production'da PREDICTED yerine kullanılacak etiket
+
+overlay:
+  limit_faces_enabled: false
+  max_faces_per_camera: null
+  draw_all_unique_faces: true
+  one_box_per_identity: true
+  suppress_raw_if_track_exists: true
+  suppress_predicted_if_real_detection_exists: true
+  draw_orphan_raw_faces: true

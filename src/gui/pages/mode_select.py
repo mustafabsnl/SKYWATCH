@@ -18,6 +18,7 @@ from gui.styles.theme import (
     GOLD, GOLD_DIM, WHITE, GRAY_1, GRAY_2, GREEN
 )
 from gui.widgets.card import Card, SectionLabel, PageTitle, Divider
+from utils.config import AppConfig
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -130,7 +131,7 @@ class CamRow(QWidget):
         lay.setSpacing(14)
 
         self._chk = QCheckBox()
-        self._chk.setChecked(True)
+        self._chk.setChecked(False)
 
         ic = QLabel("▣")
         ic.setFont(QFont("Arial", 14))
@@ -148,6 +149,7 @@ class CamRow(QWidget):
         lay.addWidget(ic)
         lay.addWidget(n, 1)
         lay.addWidget(dot)
+        self._dot = dot
 
         self.setStyleSheet(
             f"border-bottom: 1px solid {BORDER}; background: transparent;"
@@ -156,10 +158,18 @@ class CamRow(QWidget):
     def is_checked(self):
         return self._chk.isChecked()
 
+    def set_enabled(self, enabled: bool):
+        self._chk.setEnabled(enabled)
+        if not enabled:
+            self._chk.setChecked(False)
+            self._dot.setText("● Pasif")
+            self._dot.setStyleSheet(f"color: {TEXT_3};")
+
 
 class ModePage(QWidget):
     system_start = pyqtSignal(str, list)
     system_stop  = pyqtSignal()
+    _DEFAULT_TEST_CAMERAS = ["CAM_01", "CAM_03"]
 
     MODES = [
         (0, "◎", "Genel İzleme",    "Tüm kişileri takip et, DB ile karşılaştır", ACCENT),
@@ -173,6 +183,8 @@ class ModePage(QWidget):
         self._sel     = 0
         self._cams:   list[CamRow] = []
         self._running = False
+        self._cfg = AppConfig()
+        self._max_active_cameras = self._cfg.get_max_active_cameras()
         self._build()
 
     def _build(self):
@@ -296,33 +308,30 @@ class ModePage(QWidget):
             if i.widget():
                 i.widget().deleteLater()
         self._cams.clear()
-        cameras = []
+        cameras = self._cfg.cameras or [{"id": "CAM_0", "name": "Kamera 1", "enabled": True}]
 
-        # 1) Test video kaynak dosyasi varsa onu kullan
-        try:
-            from video_sources import VIDEO_SOURCES, CAMERA_LABELS
-            for cam_id in VIDEO_SOURCES.keys():
-                cameras.append({
-                    "id": cam_id,
-                    "name": CAMERA_LABELS.get(cam_id, cam_id),
-                })
-        except Exception:
-            cameras = []
-
-        # 2) Yoksa config.yaml kameralarina dus
-        if not cameras:
-            try:
-                import yaml
-                with open(PROJECT_ROOT / "config" / "config.yaml", encoding="utf-8") as f:
-                    cfg = yaml.safe_load(f)
-                cameras = cfg.get("cameras", []) or [{"id": "CAM_0", "name": "Kamera 1"}]
-            except Exception:
-                cameras = [{"id": "CAM_0", "name": "Kamera 1"}]
-
+        default_selected = {cid for cid in self._DEFAULT_TEST_CAMERAS}
         for c in cameras:
             row = CamRow(c.get("id", "CAM"), c.get("name", "Kamera"))
+            row.set_enabled(bool(c.get("enabled", True)))
+            if row._chk.isEnabled():
+                row._chk.setChecked(row.cam_id in default_selected)
+                row._chk.toggled.connect(self._on_camera_toggled)
             self._cams.append(row)
             self._cam_lay.addWidget(row)
+
+    def _on_camera_toggled(self, checked: bool):
+        if not checked:
+            return
+        selected_rows = [c for c in self._cams if c.is_checked()]
+        if len(selected_rows) <= self._max_active_cameras:
+            return
+        sender = self.sender()
+        if sender is not None:
+            sender.blockSignals(True)
+            sender.setChecked(False)
+            sender.blockSignals(False)
+        QMessageBox.warning(self, "Uyarı", f"En fazla {self._max_active_cameras} kamera seçilebilir.")
 
     def _add_cam(self):
         from PyQt6.QtWidgets import QInputDialog
@@ -355,6 +364,9 @@ class ModePage(QWidget):
         if not cams:
             QMessageBox.warning(self, "Uyarı", "En az bir kamera seçin.")
             return
+        if len(cams) > self._max_active_cameras:
+            QMessageBox.warning(self, "Uyarı", f"Maksimum {self._max_active_cameras} aktif kamera destekleniyor.")
+            return
         if self._sel == 2 and self._person_combo.currentData() is None:
             QMessageBox.warning(self, "Uyarı", "Aranacak kişiyi seçin.")
             return
@@ -383,4 +395,4 @@ class ModePage(QWidget):
     def get_camera_ids(self, only_checked: bool = False) -> list[str]:
         if only_checked:
             return [c.cam_id for c in self._cams if c.is_checked()]
-        return [c.cam_id for c in self._cams]
+        return [c.cam_id for c in self._cams if c._chk.isEnabled()]

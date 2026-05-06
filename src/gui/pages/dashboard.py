@@ -22,6 +22,7 @@ from gui.styles.theme import (
 from gui.widgets.card import (
     Card, SectionLabel, MetricCard, Divider, PulseRing, PageTitle
 )
+from utils.config import AppConfig
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -153,6 +154,7 @@ class CameraFeed(QWidget):
 # ── Dashboard Sayfası ─────────────────────────────────────────────────────────
 class DashboardPage(QWidget):
     camera_selection_changed = pyqtSignal(list)
+    _DEFAULT_TEST_CAMERAS = ["CAM_01", "CAM_03"]
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -160,6 +162,7 @@ class DashboardPage(QWidget):
         self._alert_count = 0
         self._camera_ids: list[str] = []
         self._camera_checks: dict[str, QCheckBox] = {}
+        self._max_active_cameras = AppConfig().get_max_active_cameras()
         self._build()
 
     def _build(self):
@@ -397,7 +400,7 @@ class DashboardPage(QWidget):
 
         selected = set(selected_cameras or [])
         if not selected:
-            selected = {self._camera_ids[0]}
+            selected = set(self._camera_ids[:self._max_active_cameras])
 
         for idx, cam_id in enumerate(self._camera_ids):
             chk = QCheckBox(f"Kamera {idx + 1} ({cam_id})")
@@ -412,12 +415,29 @@ class DashboardPage(QWidget):
         return [cam_id for cam_id, chk in self._camera_checks.items() if chk.isChecked()]
 
     def _emit_camera_selection(self):
-        self.camera_selection_changed.emit(self._selected_camera_ids())
+        selected = self._selected_camera_ids()
+        if len(selected) > self._max_active_cameras:
+            keep = set(selected[:self._max_active_cameras])
+            for cam_id, chk in self._camera_checks.items():
+                if cam_id not in keep and chk.isChecked():
+                    chk.blockSignals(True)
+                    chk.setChecked(False)
+                    chk.blockSignals(False)
+            selected = self._selected_camera_ids()
+        self.camera_selection_changed.emit(selected)
 
     def _select_all_cameras(self):
-        for chk in self._camera_checks.values():
+        preferred = [cid for cid in self._DEFAULT_TEST_CAMERAS if cid in self._camera_checks]
+        if len(preferred) < self._max_active_cameras:
+            for cid in self._camera_checks.keys():
+                if cid not in preferred:
+                    preferred.append(cid)
+                if len(preferred) >= self._max_active_cameras:
+                    break
+        keep = set(preferred[:self._max_active_cameras])
+        for cam_id, chk in self._camera_checks.items():
             chk.blockSignals(True)
-            chk.setChecked(True)
+            chk.setChecked(cam_id in keep)
             chk.blockSignals(False)
         self._emit_camera_selection()
 

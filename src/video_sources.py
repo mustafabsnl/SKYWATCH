@@ -21,6 +21,14 @@ VIDEO_SOURCES: dict[str, str] = {
     "CAM_12": r"C:\Users\musta\OneDrive\Desktop\SKYWATCH\Kameralar\Kamera12.mp4",
 }
 
+# Varsayilan aktif test kaynaklari (2 kamera stabil test modu)
+ACTIVE_VIDEO_SOURCE_IDS = ["CAM_01", "CAM_03"]
+
+def get_active_video_sources(max_active_cameras: int = 2) -> dict[str, str]:
+    """Sadece aktif test kaynaklarini döndürür."""
+    active_ids = ACTIVE_VIDEO_SOURCE_IDS[:max_active_cameras]
+    return {cid: VIDEO_SOURCES[cid] for cid in active_ids if cid in VIDEO_SOURCES}
+
 # Kamera ID -> UI'da gorunecek isim
 CAMERA_LABELS: dict[str, str] = {
     "CAM_01": "Kamera 1",
@@ -36,4 +44,3 @@ CAMERA_LABELS: dict[str, str] = {
     "CAM_11": "Kamera 11",
     "CAM_12": "Kamera 12",
 }
-

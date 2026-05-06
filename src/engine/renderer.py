@@ -15,6 +15,11 @@ STATUS_COLORS: dict[str, tuple[int, int, int]] = {
     "WANTED":     (0, 0, 255),      # Kirmizi
     "SUSPICIOUS": (200, 0, 200),    # Mor
     "UNKNOWN":    (160, 160, 160),  # Gri
+    "FACE":       (0, 220, 220),
+    "TENTATIVE":  (180, 180, 0),
+    "TRACKING":   (180, 180, 0),
+    "PREDICTED":  (120, 180, 255),
+    "RAW_FALLBACK": (0, 220, 220),
 }
 
 STATUS_LABELS: dict[str, str] = {
@@ -23,16 +28,38 @@ STATUS_LABELS: dict[str, str] = {
     "WANTED":     "!! ARANIYOR !!",
     "SUSPICIOUS": "SUPHELI",
     "UNKNOWN":    "?",
+    "FACE":       "FACE",
+    "TENTATIVE":  "TRACKING",
+    "TRACKING":   "TRACKING",
+    "PREDICTED":  "TRACKING",   # Production: PREDICTED yerine "TRACKING" göster
+    "RAW_FALLBACK": "FACE",
+}
+
+# Pipeline._STATUS_PRIORITY ile uyumlu kalmalı.
+STATUS_PRIORITY: dict[str, int] = {
+    "WANTED":     100,
+    "CRIMINAL":    90,
+    "SUSPICIOUS":  80,
+    "CLEAN":       70,
+    "UNKNOWN":     60,
+    "TRACKING":    50,
+    "TENTATIVE":   45,
+    "FACE":        30,
+    "PREDICTED":   10,
+    "RAW_FALLBACK":   5,
 }
 
 class OverlayRenderer:
     """Frame'e tespit sonuclarini cizer."""
 
-    def __init__(self, font_scale: float = 0.55, thickness: int = 1):
+    def __init__(self, font_scale: float = 0.55, thickness: int = 1, dedup_iou: float = 0.45, draw_predicted_tracks: bool = False):
         self.font = cv2.FONT_HERSHEY_SIMPLEX
         self.font_scale = font_scale
         self.thickness = thickness
         self._frame_count = 0
+        # Pipeline zaten dedup uyguluyor; renderer defansif olarak aynı IoU eşiğini kullanır.
+        self._dedup_iou = float(dedup_iou)
+        self._draw_predicted_tracks = bool(draw_predicted_tracks)
 
     def draw(self, frame: np.ndarray,
              results: list[DecisionResult],
@@ -42,14 +69,25 @@ class OverlayRenderer:
         display = frame.copy()
         self._frame_count += 1
         blink = (self._frame_count // 8) % 2 == 0  # ~3 Hz yanip sonme
+        # Pipeline final unique decision listesini üretir; renderer yalnızca çizer.
 
         for r in results:
+            if str(getattr(r, "status", "")).upper() == "PREDICTED" and not self._draw_predicted_tracks:
+                continue
             color = STATUS_COLORS.get(r.status, STATUS_COLORS["UNKNOWN"])
             x1, y1, x2, y2 = r.bbox
             is_threat = r.status in ("WANTED", "CRIMINAL")
+            is_predicted = r.status == "PREDICTED"
+            is_raw = r.status == "RAW_FALLBACK"
 
             # Tek kutu cizimi (cift kutu gorunumu kaldirildi)
-            box_thick = 4 if is_threat else 3
+            # PREDICTED kutular ince + production'da daha sade etiket ile çizilir
+            if is_threat:
+                box_thick = 4
+            elif is_predicted or is_raw:
+                box_thick = 1
+            else:
+                box_thick = 3
             if r.status == "WANTED" and blink:
                 cv2.rectangle(display, (x1-3, y1-3), (x2+3, y2+3), (0, 0, 255), 4)
             cv2.rectangle(display, (x1, y1), (x2, y2), color, box_thick)
@@ -57,8 +95,15 @@ class OverlayRenderer:
             # Ust etiket — Person ID varsa onu göster
             display_id = r.global_id if r.global_id else f"ID:{r.track_id}"
             label = f"{display_id} {STATUS_LABELS.get(r.status, r.status)}"
-            fs = 0.65 if is_threat else self.font_scale
-            th = 2 if is_threat else self.thickness
+            if is_threat:
+                fs = 0.65
+                th = 2
+            elif is_predicted or is_raw:
+                fs = max(0.4, self.font_scale - 0.1)
+                th = self.thickness
+            else:
+                fs = self.font_scale
+                th = self.thickness
             self._put_label(display, label, x1, y1, color, fs, th)
 
             # Alt etiket: isim + guven skoru
@@ -103,3 +148,37 @@ class OverlayRenderer:
         cv2.rectangle(frame, (x, y - height - 10), (x + tw + 6, y), color, -1)
         cv2.putText(frame, text, (x + 3, y - 5),
                     self.font, fs, (255, 255, 255), th)
+
+    def _deduplicate_results(self, results: list[DecisionResult]) -> list[DecisionResult]:
+        """Pipeline-level dedup'tan sonra defansif tekilleştirme."""
+        if not results:
+            return results
+        ordered = sorted(
+            results,
+            key=lambda r: (STATUS_PRIORITY.get(r.status, 1), float(getattr(r, "confidence", 0.0)), int(getattr(r, "track_id", 0) or 0)),
+            reverse=True,
+        )
+        kept: list[DecisionResult] = []
+        for r in ordered:
+            if not hasattr(r, "bbox") or r.bbox is None or len(r.bbox) != 4:
+                continue
+            if any(self._bbox_iou(r.bbox, k.bbox) >= self._dedup_iou for k in kept):
+                continue
+            kept.append(r)
+        return kept
+
+    def _bbox_iou(self, a: list[int], b: list[int]) -> float:
+        ax1, ay1, ax2, ay2 = a
+        bx1, by1, bx2, by2 = b
+        ix1 = max(ax1, bx1)
+        iy1 = max(ay1, by1)
+        ix2 = min(ax2, bx2)
+        iy2 = min(ay2, by2)
+        iw = max(0, ix2 - ix1)
+        ih = max(0, iy2 - iy1)
+        inter = iw * ih
+        if inter <= 0:
+            return 0.0
+        area_a = max(1, (ax2 - ax1) * (ay2 - ay1))
+        area_b = max(1, (bx2 - bx1) * (by2 - by1))
+        return inter / float(area_a + area_b - inter)
