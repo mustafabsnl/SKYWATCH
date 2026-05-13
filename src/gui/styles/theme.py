@@ -157,50 +157,10 @@ QPushButton#btn_red:disabled {{
     border: 1px solid #D8D2CC;
 }}
 
-/* ── Mod ekranı — footer + Başlat/Durdur (ModePage / mode_footer) ── */
+/* ── Mod & Kamera — footer şeridi (Başlat/Durdur stilleri ModePage.setStyleSheet) ── */
 QWidget#mode_footer {{
-    background-color: {BG_PANEL};
-    border-top: 1px solid {BORDER};
-}}
-
-QPushButton#btn_start {{
-    background-color: #e85d2a;
-    color: #ffffff;
-    border: none;
-    border-radius: 12px;
-    font-weight: 700;
-    font-size: 14px;
-    padding: 0 18px;
-    min-height: 52px;
-    max-height: 52px;
-}}
-QPushButton#btn_start:hover:enabled {{
-    background-color: #f06a36;
-}}
-QPushButton#btn_start:disabled {{
-    background-color: #d8d2cc;
-    color: #777777;
-    border: 1px solid #c8c0b8;
-}}
-
-QPushButton#btn_stop {{
-    background-color: #fff5f2;
-    color: #c0392b;
-    border: 1px solid #e0b4aa;
-    border-radius: 12px;
-    font-weight: 700;
-    font-size: 14px;
-    padding: 0 18px;
-    min-height: 52px;
-    max-height: 52px;
-}}
-QPushButton#btn_stop:hover:enabled {{
-    background-color: #ffe8e2;
-}}
-QPushButton#btn_stop:disabled {{
-    background-color: #f0ede8;
-    color: #999999;
-    border: 1px solid #ddd6ce;
+    background-color: {BG_APP};
+    border-top: 1px solid {SEP};
 }}
 
 /* ── Dark Butonu (sidebar içi) ── */

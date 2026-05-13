@@ -164,7 +164,7 @@ class MainWindow(QMainWindow):
         self._system_started_from_mode_page = False
         self._display_last_tick = 0.0
         self._display_fps_smooth = 0.0
-        self._alerted_tracks: set[tuple[str, int, str]] = set()
+        self._alerted_tracks: set[tuple[str, int, int, str]] = set()
         self._last_cam_frames: dict[str, np.ndarray] = {}
         self._last_raw_frames: dict[str, np.ndarray] = {}
         self._last_display_frames: dict[str, np.ndarray] = {}
@@ -1063,11 +1063,16 @@ class MainWindow(QMainWindow):
                 info = self._pipeline.db.get_criminal_info(d.criminal_id)
                 criminal_names[d.criminal_id] = (info or {}).get("name", "")
             if d.status in ("WANTED", "CRIMINAL", "HEDEF BULUNDU", "TARGET_FOUND"):
-                # TARGET_FOUND / HEDEF BULUNDU / WANTED / CRIMINAL → dashboard alert
-                key = (cam_id, d.track_id, d.status)
+                cid_int = int(d.criminal_id) if d.criminal_id is not None else -1
+                key = (cam_id, d.track_id, cid_int, d.status)
                 if key not in self._alerted_tracks:
                     self._alerted_tracks.add(key)
                     self._pending_alerts.append((d.track_id, d.status, criminal_names[d.criminal_id]))
+                    if self._active_mode == "GENERAL" and self._logger:
+                        self._logger.info(
+                            f"[GENERAL_ALERT_CREATED] track_id={d.track_id} person_id={cid_int} "
+                            f"name={criminal_names[d.criminal_id]} status={d.status}"
+                        )
         with self._inference_lock:
             self._last_decisions[cam_id] = decisions
             self._last_criminal_names[cam_id] = criminal_names
@@ -1361,9 +1366,7 @@ class MainWindow(QMainWindow):
                         mode="PERSON_SEARCH",
                         target_ids=list(getattr(self._pipeline, "target_person_ids", []) or []),
                         target_id=getattr(self._pipeline, "target_person_id", None),
-                        has_embedding=bool(
-                            getattr(self._pipeline, "_person_search_embeddings", None)
-                        ),
+                        has_embedding=len(getattr(self._pipeline, "_person_search_candidates", []) or []) > 0,
                         cameras=str(self._selected_cameras),
                         display_fps=round(self._display_fps_smooth, 1),
                         active_tracks=active_total,

@@ -97,8 +97,13 @@ class Pipeline:
                 f"Pipeline active cameras ({len(self._active_camera_ids)}): {', '.join(self._active_camera_ids)}"
             )
 
-        # DB embedding cache (bellekte)
+        # DB embeddings: GENERAL için aday listesi (+ legacy tuple cache)
+        self._general_candidates: list[dict] = []
+        self._person_search_candidates: list[dict] = []
         self._cached_embeddings: list[tuple[int, np.ndarray]] = []
+        self._general_hash_to_pids: dict[str, list[int]] = {}
+        self._general_pid_to_hash: dict[int, str] = {}
+        self._general_match_counts: dict[int, int] = {}
         self._refresh_cache()
 
         # Screenshot ayarları
@@ -125,18 +130,28 @@ class Pipeline:
 
         self._base_reid_threshold = 0.75
         self._criminal_reid_min_threshold = 0.88
-        self._db_match_min_threshold = 0.88
-        self._db_match_min_margin = 0.08
+
+        _face_cfg = config.get("face", {}) if hasattr(config, "get") else {}
+        _g_nested = _face_cfg.get("general") if isinstance(_face_cfg.get("general"), dict) else {}
+        _ps_nested = _face_cfg.get("person_search") if isinstance(_face_cfg.get("person_search"), dict) else {}
+        self._general_cosine_threshold = float(
+            _g_nested.get("cosine_threshold", _face_cfg.get("general_match_threshold", 0.55))
+        )
+        self._general_ambiguous_margin = float(
+            _g_nested.get("match_margin", _face_cfg.get("general_match_margin", 0.05))
+        )
+        self._person_search_cosine_threshold = float(_ps_nested.get("cosine_threshold", 0.50))
 
         # ═══ Person ID: Sabit Kişi Numarası ═══
         self._next_person_id             = 1
         self._track_to_person: dict[tuple[str, int], int] = {}  # (cam_id, track_id) → person_id
 
-        # ═══ Vote-Based Criminal Matching (3 ardışık oy gerekli) ═══
+        # ═══ Vote-Based Criminal Matching ═══
         # (cam_id, track_id) → {criminal_id: {count, best_conf, last_frame}}
         self._match_votes: dict[tuple[str, int], dict[int, dict]] = {}
-        self._vote_threshold_baseline = 3
-        self._vote_threshold = 3
+        self._vote_threshold_general = int(_face_cfg.get("general_vote_threshold", 2))
+        self._vote_threshold_ps = 1
+        self._vote_threshold = self._vote_threshold_general
 
         # ═══ DB Kontrol Aralığı (CPU koruma) ═══
         self._last_db_check_frame: dict[tuple[str, int], int] = {}
@@ -200,6 +215,13 @@ class Pipeline:
         self.target_embedding = None
         self._person_search_embeddings: dict[int, np.ndarray] = {}
 
+        # GENERAL mode summary tracking
+        self._general_summary_interval = 1.0  # seconds
+        self._general_summary_ts = 0.0
+        self._general_search_enter = 0
+        self._general_matches = 0
+        self._general_confirmed = 0
+
     def set_mode(self, mode: str, options: dict = None):
         """Çalışma modunu ve (varsa) hedef kişi bilgisini ayarlar."""
         options = dict(options or {})
@@ -230,6 +252,7 @@ class Pipeline:
         self.target_person_id = None
         self.target_embedding = None
         self._person_search_embeddings.clear()
+        self._person_search_candidates.clear()
 
         if mode_changed:
             self._match_votes.clear()
@@ -257,6 +280,7 @@ class Pipeline:
                 "PERSON_SEARCH_TARGETS_LOAD_BEGIN", person_ids=list(next_targets)
             )
 
+            self._person_search_candidates.clear()
             for pid in next_targets:
                 info = self.db.get_person_embedding_for_search(pid)
                 if info is None or info.get("embedding") is None:
@@ -269,6 +293,14 @@ class Pipeline:
                     continue
                 emb = info["embedding"]
                 self._person_search_embeddings[pid] = emb
+                self._person_search_candidates.append(
+                    {
+                        "person_id": int(pid),
+                        "name": info.get("name") or "",
+                        "status": info.get("status") or "",
+                        "embedding": emb,
+                    }
+                )
                 self.target_person_ids.append(int(pid))
                 self.logger.info(
                     f"[PERSON_SEARCH_TARGET_CACHE] person_id={pid} name=\"{info['name']}\" "
@@ -288,12 +320,18 @@ class Pipeline:
                 self.current_mode = "GENERAL"
                 self.target_person_ids = []
                 self.target_person_id = None
+                self._person_search_candidates.clear()
                 self.decision.set_mode("GENERAL", {})
                 self.logger.warning("[PIPELINE_MODE_SET_FAILED] PERSON_SEARCH no embeddings loaded for targets")
                 self.logger.person_search_trace(
                     "PERSON_SEARCH_TARGET_LOAD_FAILED", reason="no_embeddings_for_any_target"
                 )
                 return False
+
+            self.logger.info(
+                f"[PERSON_SEARCH_TARGETS_LOADED] count={len(self._person_search_candidates)} "
+                f"ids={list(self.target_person_ids)}"
+            )
 
             self.target_person_id = self.target_person_ids[0]
             self.target_embedding = (
@@ -314,30 +352,66 @@ class Pipeline:
             )
 
         elif mode == "GENERAL":
-            self.logger.info("[PIPELINE_MODE_SET] mode=GENERAL")
-            self.logger.person_search_trace("PIPELINE_MODE_SET_GENERAL", status="OK")
             self.target_embedding = None
             self.target_person_ids = []
             self._person_search_embeddings.clear()
+            self._person_search_candidates.clear()
+            self._general_match_counts.clear()
             self._refresh_cache()
             self.decision.set_mode(mode, options)
-            self.logger.person_search_trace("PIPELINE_DECISION_MODE_SET", mode=mode, target_person_id=None)
+            _ids = sorted({int(c["person_id"]) for c in self._general_candidates})
+            self.logger.info(
+                f"[GENERAL_CANDIDATES_LOADED] count={len(self._general_candidates)} "
+                f"unique_persons={len(_ids)} ids={_ids}"
+            )
+            for c in self._general_candidates:
+                self.logger.info(
+                    f"[GENERAL_CANDIDATE_HASH] person_id={c['person_id']} "
+                    f"name=\"{c.get('name', '')}\" status={c.get('status', '')} "
+                    f"hash={c.get('embedding_hash', 'N/A')} obj_id={id(c.get('embedding'))}"
+                )
+            dup_groups = {h: pids for h, pids in self._general_hash_to_pids.items() if len(pids) > 1}
+            if dup_groups:
+                self.logger.warning(
+                    f"[GENERAL_DUPLICATE_EMBEDDINGS_DETECTED] "
+                    f"groups={dup_groups} "
+                    f"note='These persons share identical embeddings; GENERAL will use status_priority resolution'"
+                )
+            self.logger.info(
+                f"[GENERAL_MODE_READY] current_mode=GENERAL "
+                f"target_embedding=false candidates={len(self._general_candidates)} "
+                f"vote_threshold={self._vote_threshold_general} "
+                f"cosine_threshold={self._general_cosine_threshold:.2f}"
+            )
 
         if self.current_mode == "PERSON_SEARCH":
-            self._vote_threshold = 1
+            self._vote_threshold = self._vote_threshold_ps
         else:
-            self._vote_threshold = self._vote_threshold_baseline
+            self._vote_threshold = self._vote_threshold_general
 
-        emb_ready = len(self._person_search_embeddings) > 0 if self.current_mode == "PERSON_SEARCH" else False
+        emb_ready = (
+            len(self._person_search_candidates) > 0
+            if self.current_mode == "PERSON_SEARCH"
+            else False
+        )
         self.logger.person_search_trace(
             "PERSON_SEARCH_TARGET_CACHE_STATE",
             has_target_embedding=emb_ready,
             target_person_ids=list(self.target_person_ids),
             target_person_id=self.target_person_id,
         )
+        if self.current_mode == "GENERAL":
+            _guniq = len({int(c["person_id"]) for c in self._general_candidates})
+            extra_state = (
+                f"general_candidate_rows={len(self._general_candidates)} "
+                f"general_unique_persons={_guniq}"
+            )
+        else:
+            extra_state = f"person_search_candidates={len(self._person_search_candidates)}"
+
         self.logger.info(
             f"[PIPELINE_MODE_STATE] current_mode={self.current_mode} target_person_ids={self.target_person_ids} "
-            f"has_targets_embedded={str(emb_ready).lower()}"
+            f"has_targets_embedded={str(emb_ready).lower()} {extra_state}"
         )
         self.logger.info(f"[PIPELINE_MODE_SET_DONE] mode={self.current_mode} current_mode={self.current_mode}")
         return True
@@ -384,14 +458,15 @@ class Pipeline:
         return s in ("WANTED", "CRIMINAL", "ARANIYOR", "CLEAN", "TEMIZ", "TEMİZ", "UNKNOWN", "TRACKING", "TENTATIVE")
 
     _STATUS_PRIORITY: dict[str, int] = {
-        "WANTED": 100,
-        "CRIMINAL": 100,
-        "ARANIYOR": 100,
-        "HEDEF BULUNDU": 110,
-        "TARGET_FOUND": 110,
+        "HEDEF BULUNDU": 120,
+        "TARGET_FOUND": 120,
+        "WANTED": 110,
+        "CRIMINAL": 105,
+        "ARANIYOR": 110,
         "CLEAN": 90,
         "TEMIZ": 90,
         "TEMİZ": 90,
+        "SUSPICIOUS": 85,
         "UNKNOWN": 80,
         "TRACKING": 70,
         "TENTATIVE": 60,
@@ -651,9 +726,68 @@ class Pipeline:
 
     # ──────────────────────────────────────────────────────────────────────
     def _refresh_cache(self):
-        """DB'den tüm embedding'leri belleğe çeker."""
-        self._cached_embeddings = self.db.get_all_embeddings()
-        self.logger.debug(f"Pipeline: {len(self._cached_embeddings)} embedding cache'e alındı")
+        """GENERAL mod aday listesini ve legacy tuple cache'i DB'den yükler."""
+        self._general_candidates = self.db.get_all_person_embeddings_for_general()
+        self._cached_embeddings = [
+            (int(c["person_id"]), c["embedding"]) for c in self._general_candidates
+        ]
+        self._general_hash_to_pids: dict[str, list[int]] = {}
+        self._general_pid_to_hash: dict[int, str] = {}
+        for c in self._general_candidates:
+            h = c.get("embedding_hash", "")
+            pid = int(c["person_id"])
+            if h:
+                self._general_hash_to_pids.setdefault(h, []).append(pid)
+                self._general_pid_to_hash[pid] = h
+
+        count = len(self._general_candidates)
+        if count > 0:
+            self.logger.info(f"[GENERAL_DB_CACHE_REFRESH] rows={count}")
+        else:
+            self.logger.warning("[GENERAL_DB_CACHE_EMPTY] reason=no_valid_embeddings")
+
+        dup_groups = {h: pids for h, pids in self._general_hash_to_pids.items() if len(pids) > 1}
+        if dup_groups:
+            self.logger.warning(
+                f"[GENERAL_DUPLICATE_HASH_GROUPS] groups={dup_groups}"
+            )
+
+    # ──────────────────────────────────────────────────────────────────────
+    _STATUS_PRIORITY_FOR_RESOLVE: dict[str, int] = {
+        "WANTED": 100,
+        "CRIMINAL": 90,
+        "CLEARED": 50,
+        "CLEAN": 50,
+    }
+
+    def _resolve_duplicate_embedding_group(self, pids: list[int]) -> int:
+        """
+        Aynı embedding hash'e sahip birden fazla person_id varsa,
+        status önceliğine göre (WANTED > CRIMINAL > CLEAN) ve
+        en küçük person_id ile deterministik seçim yapar.
+        """
+        if not pids:
+            return -1
+        if len(pids) == 1:
+            return pids[0]
+
+        best_pid = pids[0]
+        best_prio = -1
+        for pid in pids:
+            cand = next((c for c in self._general_candidates if int(c["person_id"]) == pid), None)
+            if cand is None:
+                continue
+            status_u = str(cand.get("status", "")).upper()
+            prio = self._STATUS_PRIORITY_FOR_RESOLVE.get(status_u, 0)
+            if prio > best_prio or (prio == best_prio and pid < best_pid):
+                best_prio = prio
+                best_pid = pid
+
+        self.logger.info(
+            f"[GENERAL_DUPLICATE_EMBEDDING_RESOLVE] candidates={pids} "
+            f"selected={best_pid} reason=status_priority_then_id"
+        )
+        return best_pid
 
     # ──────────────────────────────────────────────────────────────────────
     def _dynamic_reid_threshold(self) -> float:
@@ -745,7 +879,7 @@ class Pipeline:
                 mode=self.current_mode, 
                 target_person_ids=list(self.target_person_ids),
                 target_id=self.target_person_id,
-                has_target_embedding=(len(self._person_search_embeddings) > 0),
+                has_target_embedding=(len(self._person_search_candidates) > 0),
             )
             self.logger.person_search_trace(
                 "PS_FACE_DETECT", 
@@ -823,21 +957,23 @@ class Pipeline:
 
             # ─── AŞAMA 4: EMBEDDING KONTROLÜ ───────────────────────
             confirmed_match = self._get_confirmed_match(track_key)
+            _log_gates = bool(cfg_debug.get("person_search_log_track_gates", True))
 
-            # Track oturmadan DB arama yapma
             if track.face_embedding is None:
-                if is_ps and bool(cfg_debug.get("person_search_log_track_gates", True)):
-                    self.logger.person_search_trace("PS_TRACK_GATE_SKIP", track_id=track.track_id, reason="no_face_embedding")
+                if _log_gates:
+                    if is_ps:
+                        self.logger.person_search_trace("PS_TRACK_GATE_SKIP", track_id=track.track_id, reason="no_face_embedding")
             elif confirmed_match is not None:
-                if is_ps and bool(cfg_debug.get("person_search_log_track_gates", True)):
-                    self.logger.person_search_trace("PS_TRACK_GATE_SKIP", track_id=track.track_id, reason="confirmed_match_already_exists", criminal_id=confirmed_match.criminal_id)
+                if _log_gates:
+                    if is_ps:
+                        self.logger.person_search_trace("PS_TRACK_GATE_SKIP", track_id=track.track_id, reason="confirmed_match_already_exists", criminal_id=confirmed_match.criminal_id)
             else:
                 if not track.velocity_ok:
                     self.stats["velocity_rejected"] += 1
-                    if is_ps and bool(cfg_debug.get("person_search_log_track_gates", True)):
+                    if is_ps and _log_gates:
                         self.logger.person_search_trace("PS_TRACK_VELOCITY_NOTE", track_id=track.track_id, velocity_ok=False)
+
                 if track.face_embedding is not None:
-                    # Person ID ata (ilk kez görülmüşse)
                     if track_key not in self._track_to_person:
                         reid_threshold = self._dynamic_reid_threshold()
                         reid_result = self._check_session_cache(
@@ -855,17 +991,23 @@ class Pipeline:
                                 pid, track.face_embedding.copy(), None, None
                             )
 
-                    # Active modes compare every valid live embedding against the configured search scope.
-                    if track.face_embedding is not None:
-                        if is_ps and bool(cfg_debug.get("person_search_log_track_gates", True)):
-                            self.logger.person_search_trace("PS_TRACK_GATE_PASS", track_id=track.track_id, age=track.age, has_embedding=True, velocity_ok=bool(track.velocity_ok))
-                            
-                        self._last_db_check_frame[track_key] = self._frame_total
-                        t_db = time.perf_counter()
-                        match = self._search_in_db_cache(track.face_embedding, track.track_id)
-                        db_search_ms += (time.perf_counter() - t_db) * 1000.0
-                        if match is not None:
-                            self._register_vote(track_key, match, camera_id, track, frame)
+                    if is_ps and _log_gates:
+                        self.logger.person_search_trace(
+                            "PS_TRACK_GATE_PASS", track_id=track.track_id,
+                            age=track.age, has_embedding=True,
+                            velocity_ok=bool(track.velocity_ok),
+                        )
+
+                    self._last_db_check_frame[track_key] = self._frame_total
+                    t_db = time.perf_counter()
+                    match = self._match_track_against_candidates(
+                        track.face_embedding,
+                        track.track_id,
+                        "PERSON_SEARCH" if is_ps else "GENERAL",
+                    )
+                    db_search_ms += (time.perf_counter() - t_db) * 1000.0
+                    if match is not None:
+                        self._register_vote(track_key, match, camera_id, track, frame)
             # ─── Person ID'yi track'e ata ───────────────────────────────
             if track_key in self._track_to_person:
                 track.global_id = f"{camera_id}-T{track.track_id}"
@@ -1112,6 +1254,36 @@ class Pipeline:
             "unique_overlay_count": len(results),
             "real_faces_drawn_count": len([r for r in results if self._status_norm(getattr(r, "status", "")) in ("CLEAN", "TEMIZ", "UNKNOWN", "TRACKING", "TENTATIVE", "FACE", "WANTED", "CRIMINAL", "ARANIYOR", "HEDEF BULUNDU")]),
         }
+
+        # GENERAL mode periodic summary
+        if self.current_mode == "GENERAL":
+            now = time.perf_counter()
+            if (now - self._general_summary_ts) >= self._general_summary_interval:
+                statuses = [self._status_norm(getattr(r, "status", "")) for r in results]
+                active_cm = {
+                    int(t.track_id): int(t.criminal_match.criminal_id)
+                    for t in tracks
+                    if getattr(t, "criminal_match", None) is not None
+                }
+                _uids = sorted({int(c["person_id"]) for c in self._general_candidates})
+                dup_groups = {h: pids for h, pids in self._general_hash_to_pids.items() if len(pids) > 1}
+                self.logger.info(
+                    f"[GENERAL_SUMMARY] faces={len(faces)} tracks={len(tracks)} "
+                    f"tracks_with_emb={sum(1 for t in tracks if t.face_embedding is not None)} "
+                    f"general_candidates={len(self._general_candidates)} unique_db_persons={len(_uids)} "
+                    f"decisions={statuses} active_matches={active_cm or {}} "
+                    f"matches={self.stats['total_matches']}"
+                )
+                if self._general_match_counts:
+                    self.logger.info(
+                        f"[GENERAL_MATCH_DISTRIBUTION] matches_by_person={dict(self._general_match_counts)}"
+                    )
+                if dup_groups:
+                    self.logger.info(
+                        f"[GENERAL_DUPLICATE_HASH_GROUPS] groups={dup_groups}"
+                    )
+                self._general_summary_ts = now
+
         return results
 
     def begin_cycle(self):
@@ -1182,12 +1354,11 @@ class Pipeline:
 
         info = votes[cid]
 
-        # Ardışıklık kontrolü: DB kontrolü her _db_check_interval frame'de bir
-        # yapıldığı için, arada (_db_check_interval + 3) frame'den fazla
-        # boşluk varsa ardışıklık bozulmuştur.
-        max_gap = self._db_check_interval + 3
+        # GENERAL modda frame gap toleransı daha geniş tutulur çünkü
+        # detect_every_n=4 frame'de 1 yüz çıkarılır — ardışıklık kopmamalı.
+        max_gap = (self._detect_every_n * (self._vote_threshold + 1)) + 4
         if info["last_frame"] > 0 and (current_frame - info["last_frame"]) > max_gap:
-            info["count"] = 1  # Ardışıklık bozuldu, yeniden başla
+            info["count"] = 1
         else:
             info["count"] += 1
 
@@ -1203,8 +1374,13 @@ class Pipeline:
                 threshold=self._vote_threshold,
                 best_conf=float(info["best_conf"]),
             )
+        else:
+            self.logger.info(
+                f"[GENERAL_VOTE_REGISTER] track_id={track.track_id} person_id={cid} "
+                f"score={match.confidence:.4f} count={info['count']}/{self._vote_threshold}"
+            )
 
-        if info["count"] == self._vote_threshold:
+        if info["count"] >= self._vote_threshold:
             if is_ps:
                 self.logger.info(
                     f"[PERSON_SEARCH_DIRECT_MATCH_SET] track_id={track.track_id} target_id={cid} score={float(info['best_conf']):.3f}"
@@ -1216,11 +1392,29 @@ class Pipeline:
                     count=info["count"],
                     best_conf=float(info["best_conf"]),
                 )
-            # 3 ardışık frame eşleşmesi → suçlu onaylandı
+            else:
+                self.logger.info(
+                    f"[GENERAL_VOTE_CONFIRMED] track_id={track.track_id} person_id={cid} "
+                    f"confidence={float(info['best_conf']):.4f} votes={info['count']}"
+                )
+                self.logger.info(
+                    f"[GENERAL_MATCH_SET] camera_id={camera_id} track_id={track.track_id} "
+                    f"person_id={cid} confidence={float(info['best_conf']):.4f}"
+                )
+
             self.stats["total_matches"] += 1
             criminal_info = self.db.get_criminal_info(cid)
             status = criminal_info.get("status", "") if criminal_info else ""
             name = criminal_info.get("name", "?") if criminal_info else "?"
+
+            if not is_ps:
+                if criminal_info:
+                    self.logger.info(
+                        f"[GENERAL_CRIMINAL_INFO_LOAD] criminal_id={cid} found=true "
+                        f"name={name} status={status}"
+                    )
+                else:
+                    self.logger.warning(f"[GENERAL_CRIMINAL_INFO_MISSING] criminal_id={cid}")
 
             if is_ps:
                 self.logger.log(
@@ -1293,101 +1487,161 @@ class Pipeline:
             
         return None
 
-    # ──────────────────────────────────────────────────────────────────────
-    def _search_in_db_cache(self, embedding: np.ndarray, track_id: int = None) -> MatchResult | None:
-        """DB cache üzerinden embedding karşılaştırma."""
-        
-        # PERSON_SEARCH modundaysa sadece hedef kişiyi ara
-        if self.current_mode == "PERSON_SEARCH":
-            if not self._person_search_embeddings:
+    def _match_track_against_candidates(
+        self,
+        embedding: np.ndarray | None,
+        track_id: int | None,
+        mode: str,
+    ) -> MatchResult | None:
+        """
+        GENERAL ve PERSON_SEARCH için ortak eşleştirici.
+        Adaylar embedding sahibi tüm satırlardır; skorlar person_id bazında toplanır (duplicate satırlar birleşir).
+        """
+        tid = track_id if track_id is not None else -1
+        mode_u = str(mode or "GENERAL").upper()
+
+        if embedding is None:
+            self.logger.info(
+                f"[COMMON_MATCH_MISS] mode={mode_u} track_id={tid} reason=no_embedding"
+            )
+            if mode_u == "PERSON_SEARCH":
+                self.logger.person_search_trace("PS_SEARCH_FAIL", reason="live_embedding_none")
+            return None
+
+        if mode_u == "PERSON_SEARCH":
+            candidates = self._person_search_candidates
+            if not candidates:
                 self.logger.person_search_trace("PS_SEARCH_FAIL", reason="targets_embedding_none")
                 return None
-            if embedding is None:
-                self.logger.person_search_trace("PS_SEARCH_FAIL", reason="live_embedding_none")
-                return None
+            threshold = self._person_search_cosine_threshold
+            use_ambiguous = False
+        else:
+            candidates = self._general_candidates
+            threshold = self._general_cosine_threshold
+            use_ambiguous = True
 
-            tid = track_id if track_id is not None else -1
+        n = len(candidates)
+        if n == 0:
             self.logger.info(
-                f"[PERSON_SEARCH_SEARCH_ENTER] track_id={tid} targets={list(self._person_search_embeddings.keys())}"
+                f"[COMMON_MATCH_MISS] mode={mode_u} track_id={tid} reason=empty_candidates"
             )
+            return None
 
-            cfg = self.config.get("face", {}).get("person_search", {}) if hasattr(self.config, "get") else {}
-            min_thr = float(cfg.get("cosine_threshold", 0.50))
+        self.logger.info(f"[COMMON_MATCH_ENTER] mode={mode_u} track_id={tid} candidates={n}")
 
-            best_pid = None
-            best_score = -1.0
-            for cand_id, targ_emb in self._person_search_embeddings.items():
-                try:
-                    score = self.face_analyzer.compare(embedding, targ_emb)
-                except Exception as e:
+        best_by_pid: dict[int, float] = {}
+        for c in candidates:
+            pid = int(c["person_id"])
+            emb = c.get("embedding")
+            if emb is None:
+                continue
+            try:
+                score = self.face_analyzer.compare(embedding, emb)
+            except Exception as e:
+                if mode_u == "PERSON_SEARCH":
                     self.logger.person_search_trace(
                         "PS_SEARCH_FAIL",
                         reason="compare_exception",
-                        candidate_id=cand_id,
+                        candidate_id=pid,
                         error=str(e),
                     )
-                    continue
-                if score > best_score:
-                    best_score = score
-                    best_pid = cand_id
+                continue
+            self.logger.info(
+                f"[COMMON_MATCH_SCORE] mode={mode_u} track_id={tid} person_id={pid} score={score:.4f}"
+            )
+            prev = best_by_pid.get(pid, -1.0)
+            if score > prev:
+                best_by_pid[pid] = score
 
-            if best_pid is None or best_score < 0:
+        if not best_by_pid:
+            if mode_u == "PERSON_SEARCH":
                 self.logger.person_search_trace("PS_SEARCH_FAIL", reason="compare_all_failed")
-                return None
-
-            self.logger.info(
-                f"[PERSON_SEARCH_SCORE] track_id={tid} best_target_id={best_pid} "
-                f"score={best_score:.4f} threshold={min_thr:.4f}"
-            )
-
-            if best_score >= min_thr:
+            else:
                 self.logger.info(
-                    f"[PERSON_SEARCH_MATCH] track_id={tid} target_id={best_pid} score={best_score:.4f}"
+                    f"[COMMON_MATCH_MISS] mode={mode_u} track_id={tid} reason=no_scores"
                 )
-                return MatchResult(criminal_id=int(best_pid), confidence=float(best_score))
-
-            self.logger.info(
-                f"[PERSON_SEARCH_NO_MATCH] track_id={tid} best_target_id={best_pid} score={best_score:.4f}"
-            )
             return None
 
-        # GENERAL — tam veritabanı embeddings listesi
-        tid = track_id if track_id is not None else -1
-        nemb = len(self._cached_embeddings)
-        self.logger.info(f"[GENERAL_SEARCH_ENTER] track_id={tid} db_embeddings={nemb}")
-
-        best_cid = None
-        best_score = 0.0
-        second_score = 0.0
-
-        for cid, db_emb in self._cached_embeddings:
-            score = self.face_analyzer.compare(embedding, db_emb)
-            self.logger.info(f"[GENERAL_SEARCH_SCORE] track_id={tid} candidate_id={cid} score={score:.4f}")
-            if score > best_score:
-                second_score = best_score
-                best_score = score
-                best_cid = cid
-            elif score > second_score:
-                second_score = score
-
-        min_thr = max(self.face_analyzer.threshold, self._db_match_min_threshold)
-        if best_cid is None or best_score < min_thr:
-            self.logger.info(
-                f"[GENERAL_SEARCH_NO_MATCH] track_id={tid} best_score={best_score:.4f} threshold={min_thr:.4f}"
-            )
-            return None
-
-        if (best_score - second_score) < self._db_match_min_margin:
-            self.logger.info(
-                f"[GENERAL_SEARCH_NO_MATCH] track_id={tid} best_score={best_score:.4f} threshold={min_thr:.4f} "
-                f"reason=ambiguous_margin second_best={second_score:.4f}"
-            )
-            return None
+        ranked = sorted(best_by_pid.items(), key=lambda x: x[1], reverse=True)
+        best_id = int(ranked[0][0])
+        best_score = float(ranked[0][1])
+        second_id = int(ranked[1][0]) if len(ranked) > 1 else None
+        second_score = float(ranked[1][1]) if second_id is not None else -1.0
 
         self.logger.info(
-            f"[GENERAL_SEARCH_MATCH] track_id={tid} person_id={best_cid} score={best_score:.4f} threshold={min_thr:.4f}"
+            f"[COMMON_MATCH_BEST] mode={mode_u} track_id={tid} best_id={best_id} "
+            f"best_score={best_score:.4f} second_id={second_id} second_score={second_score:.4f} "
+            f"threshold={threshold:.4f}"
         )
-        return MatchResult(criminal_id=best_cid, confidence=best_score)
+
+        if best_score < threshold:
+            if mode_u == "PERSON_SEARCH":
+                self.logger.info(
+                    f"[PERSON_SEARCH_NO_MATCH] track_id={tid} best_target_id={best_id} "
+                    f"score={best_score:.4f}"
+                )
+            self.logger.info(
+                f"[COMMON_MATCH_MISS] mode={mode_u} track_id={tid} "
+                f"best_score={best_score:.4f} threshold={threshold:.4f}"
+            )
+            return None
+
+        margin = self._general_ambiguous_margin if use_ambiguous else 0.0
+        final_id = best_id
+
+        if use_ambiguous and second_id is not None and margin > 0:
+            competitor = second_score >= threshold
+            gap_ok = (best_score - second_score) >= margin
+            best_hash = self._general_pid_to_hash.get(best_id, "")
+            second_hash = self._general_pid_to_hash.get(second_id, "")
+            same_hash = bool(best_hash and best_hash == second_hash)
+
+            self.logger.info(
+                f"[GENERAL_AMBIGUOUS_CHECK] best_id={best_id} second_id={second_id} "
+                f"best_hash={best_hash[:8] if best_hash else 'N/A'} "
+                f"second_hash={second_hash[:8] if second_hash else 'N/A'} "
+                f"same_hash={str(same_hash).lower()} "
+                f"best_score={best_score:.4f} second_score={second_score:.4f}"
+            )
+
+            if same_hash and competitor:
+                dup_pids = self._general_hash_to_pids.get(best_hash, [best_id])
+                final_id = self._resolve_duplicate_embedding_group(dup_pids)
+                self.logger.info(
+                    f"[GENERAL_AMBIGUOUS_ACCEPT] reason=same_embedding_hash "
+                    f"resolved_id={final_id}"
+                )
+            elif competitor and not gap_ok:
+                self.logger.info(
+                    f"[GENERAL_AMBIGUOUS_REJECT] reason=different_identity_margin_low "
+                    f"best_id={best_id} second_id={second_id} "
+                    f"gap={best_score - second_score:.4f} margin={margin:.4f}"
+                )
+                return None
+            elif not competitor:
+                self.logger.info(
+                    f"[GENERAL_AMBIGUOUS_ACCEPT] reason=second_below_threshold "
+                    f"second_id={second_id} second_score={second_score:.4f}"
+                )
+            elif gap_ok:
+                self.logger.info(
+                    f"[GENERAL_AMBIGUOUS_ACCEPT] reason=sufficient_gap "
+                    f"gap={best_score - second_score:.4f}"
+                )
+        elif use_ambiguous:
+            self.logger.info("[GENERAL_AMBIGUOUS_ACCEPT] reason=no_competitor_or_single_identity")
+
+        if mode_u == "GENERAL":
+            self._general_match_counts[final_id] = self._general_match_counts.get(final_id, 0) + 1
+
+        self.logger.info(
+            f"[COMMON_MATCH_HIT] mode={mode_u} track_id={tid} person_id={final_id} score={best_score:.4f}"
+        )
+        if mode_u == "PERSON_SEARCH":
+            self.logger.info(
+                f"[PERSON_SEARCH_MATCH] track_id={tid} target_id={best_id} score={best_score:.4f}"
+            )
+        return MatchResult(criminal_id=final_id, confidence=best_score)
 
     # ──────────────────────────────────────────────────────────────────────
     def _save_detection_screenshot(

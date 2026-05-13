@@ -41,20 +41,20 @@ STATUS_LABELS: dict[str, str] = {
 
 # Pipeline._STATUS_PRIORITY ile uyumlu kalmalı.
 STATUS_PRIORITY: dict[str, int] = {
-    "WANTED":     100,
-    "CRIMINAL":   100,
-    "ARANIYOR":   100,
+    "HEDEF BULUNDU": 120,
+    "TARGET_FOUND": 120,
+    "WANTED":     110,
+    "CRIMINAL":   105,
+    "ARANIYOR":   110,
     "CLEAN":       90,
     "TEMIZ":       90,
+    "SUSPICIOUS":  85,
     "UNKNOWN":     80,
     "TRACKING":    70,
     "TENTATIVE":   60,
     "FACE":        50,
     "RAW_FALLBACK": 30,
     "PREDICTED":   10,
-    "SUSPICIOUS":  20,
-    "HEDEF BULUNDU": 110,
-    "TARGET_FOUND": 110,
 }
 
 class OverlayRenderer:

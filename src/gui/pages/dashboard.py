@@ -16,7 +16,7 @@ from PyQt6.QtGui import QPixmap, QImage, QFont
 
 from gui.styles.theme import (
     SURFACE, SURFACE_2, BORDER, ACCENT, ACCENT_2,
-    TEXT_1, TEXT_2, TEXT_3, RED, STATUS_COLORS,
+    TEXT_1, TEXT_2, TEXT_3, STATUS_COLORS,
 )
 from gui.widgets.card import (
     Card, SectionLabel, MetricCard, Divider, PulseRing, PageTitle
@@ -192,17 +192,24 @@ class DashboardPage(QWidget):
 
         left.addLayout(hdr)
 
-        # ── 4 Metrik Kart ────────────────────────────────────────────────
+        # ── KPI: FPS + Aktif Track (aynı genişlik, üst satırda dengeli) ──
         metrics = QHBoxLayout()
-        metrics.setSpacing(16)
+        metrics.setSpacing(14)
+        metrics.setContentsMargins(0, 0, 0, 0)
 
-        self._m_fps    = MetricCard("FPS",          "—",  "kare/saniye",    ACCENT,   "◎")
-        self._m_active = MetricCard("Aktif Track",  "0",  "kişi izleniyor", ACCENT_2, "◉")
-        self._m_total  = MetricCard("Toplam Tespit","0",  "bu oturumda",    TEXT_2,   "⊞")
-        self._m_alert  = MetricCard("Uyarı",        "0",  "kritik durum",   RED,      "⚠")
+        self._m_fps = MetricCard("FPS", "—", "kare/saniye", ACCENT, "◎")
+        self._m_active = MetricCard("Aktif Track", "0", "kişi izleniyor", ACCENT_2, "◉")
+        pol = QSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        for m in (self._m_fps, self._m_active):
+            m.setSizePolicy(pol)
+            m.setMinimumWidth(200)
+            m.setMaximumWidth(320)
 
-        for m in [self._m_fps, self._m_active, self._m_total, self._m_alert]:
-            metrics.addWidget(m)
+        metrics.addStretch(1)
+        metrics.addWidget(self._m_fps, 1)
+        metrics.addWidget(self._m_active, 1)
+        metrics.addStretch(1)
+
         left.addLayout(metrics)
 
         # ── Kamera Kartı ─────────────────────────────────────────────────
@@ -309,10 +316,9 @@ class DashboardPage(QWidget):
 
     # ── Güncelleme API ────────────────────────────────────────────────────────
     def update_stats(self, fps: float, active: int, total: int, alerts: int):
+        """`total` ve `alerts` MainWindow ile imza uyumu için gelir; KPI satırında gösterilmez."""
         self._m_fps.set_value(f"{fps:.1f}")
         self._m_active.set_value(str(active))
-        self._m_total.set_value(str(total))
-        self._m_alert.set_value(str(alerts))
 
     def update_frame(self, frame: np.ndarray):
         self._feed.update_frame(frame)

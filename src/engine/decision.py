@@ -148,8 +148,8 @@ class DecisionEngine:
                 status = "UNKNOWN"
                 color = self.colors["UNKNOWN"]
 
-        # 3. Quality Overrides (Velocity and Age) — onaylı hedef / aranan / sabıkalı korunur
-        protected = ("HEDEF BULUNDU", "TARGET_FOUND", "WANTED", "CRIMINAL")
+        # 3. Quality Overrides (Velocity and Age) — DB-confirmed statuses are protected
+        protected = ("HEDEF BULUNDU", "TARGET_FOUND", "WANTED", "CRIMINAL", "CLEAN")
         if status not in protected:
             if not track.velocity_ok or track.age < 5:
                 status = "UNKNOWN"

@@ -86,9 +86,22 @@ regions:
 # --- Yüz Tanıma Ayarları ---
 face:
   recognition_model: "buffalo_l"
-  similarity_threshold: 0.3             # Dusuruldu (0.45 gercek dunyu icin cok kati)
+  similarity_threshold: 0.3             # Dusuruldu (0.45 gercek dunya icin cok kati)
   min_face_size: 30                      # 30px altindaki yuzleri yoksay (telefon ekrani vb.)
   scan_interval_ms: 500                  # Tarama araligi (ms)
+
+  # GENERAL mod — tam DB karsilastirma esikleri
+  general_match_threshold: 0.55          # Cosine benzerlik esigi (GENERAL mod)
+  general_match_margin: 0.05             # En iyi ile ikinci arasi minimum fark
+  general_vote_threshold: 2              # Ardilik oy sayisi (GENERAL onay icin)
+
+  # GENEL: cosine_threshold ve match_margin — flat general_match_* ile birlikte kullanılır (fallback)
+  general:
+    cosine_threshold: 0.55
+    match_margin: 0.05
+  person_search:
+    cosine_threshold: 0.50
+
   duplicate_check:
     enabled: true
     cosine_threshold: 0.62

@@ -52,9 +52,60 @@ if not _mode_log.handlers:
 
 
 _FALLBACK_FIXED_CAMERAS = ["CAM_01", "CAM_03"]
-_BTN_H = 52
 _ROW_H = 48
 _CHIP_H = 32
+
+# Mod & Kamera — alt aksiyon butonları (Qt disabled yerine manuel stiller; GLOBAL QSS ile çakışmayı keser)
+_SS_MODE_BTN_BASE = """
+    font-weight: 700;
+    font-size: 14px;
+    border-radius: 12px;
+    padding: 0 16px;
+"""
+
+_SS_START_PROMINENT = f"""
+QPushButton {{
+    background: #e85d2a;
+    color: #ffffff;
+    border: none;
+    {_SS_MODE_BTN_BASE}
+}}
+QPushButton:hover {{ background: #f06a36; color: #ffffff; }}
+QPushButton:pressed {{ background: #d14e22; color: #ffffff; }}
+"""
+
+_SS_START_NEUTRAL = f"""
+QPushButton {{
+    background: #f2eee8;
+    color: #8a8178;
+    border: 1px solid #d5cdc4;
+    {_SS_MODE_BTN_BASE}
+}}
+QPushButton:hover {{ background: #eae4dc; color: #6f6a64; }}
+QPushButton:pressed {{ background: #ddd8cf; }}
+"""
+
+_SS_STOP_PROMINENT = f"""
+QPushButton {{
+    background: #fff1ed;
+    color: #c0392b;
+    border: 1px solid #e0b4aa;
+    {_SS_MODE_BTN_BASE}
+}}
+QPushButton:hover {{ background: #ffe4dc; color: #a93226; }}
+QPushButton:pressed {{ background: #ffd4cc; }}
+"""
+
+_SS_STOP_NEUTRAL = f"""
+QPushButton {{
+    background: #f2eee8;
+    color: #8a8178;
+    border: 1px solid #d5cdc4;
+    {_SS_MODE_BTN_BASE}
+}}
+QPushButton:hover {{ background: #eae4dc; color: #6f6a64; }}
+QPushButton:pressed {{ background: #ddd8cf; }}
+"""
 
 
 class _PersonPickRow(QWidget):
@@ -495,9 +546,10 @@ class ModePage(QWidget):
 
         footer = QWidget()
         footer.setObjectName("mode_footer")
+        footer.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         fl = QVBoxLayout(footer)
-        fl.setContentsMargins(56, 16, 56, 20)
-        fl.setSpacing(6)
+        fl.setContentsMargins(56, 8, 56, 12)
+        fl.setSpacing(4)
 
         self._summary = QLabel()
         self._summary.setFont(QFont("Segoe UI", 9))
@@ -507,27 +559,25 @@ class ModePage(QWidget):
         fl.addWidget(self._summary)
 
         btn_row = QHBoxLayout()
-        btn_row.setContentsMargins(0, 0, 0, 0)
+        btn_row.setContentsMargins(0, 2, 0, 0)
         btn_row.setSpacing(14)
 
-        pol_btn = QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-
         self._btn_stop = QPushButton("■  Durdur")
-        self._btn_stop.setObjectName("btn_stop")
-        self._btn_stop.setFixedHeight(_BTN_H)
-        self._btn_stop.setSizePolicy(pol_btn)
-        self._btn_stop.setEnabled(False)
+        self._btn_stop.setObjectName("mode_btn_stop")
+        self._btn_stop.setFixedHeight(52)
         self._btn_stop.clicked.connect(self._stop)
 
         self._btn_start = QPushButton("▶  Sistemi Başlat")
-        self._btn_start.setObjectName("btn_start")
-        self._btn_start.setFixedHeight(_BTN_H)
-        self._btn_start.setSizePolicy(pol_btn)
+        self._btn_start.setObjectName("mode_btn_start")
+        self._btn_start.setFixedHeight(52)
         try:
             self._btn_start.clicked.disconnect()
         except TypeError:
             pass
         self._btn_start.clicked.connect(self._start)
+
+        self._btn_start.setEnabled(True)
+        self._btn_stop.setEnabled(True)
 
         try:
             nrecv = self._btn_start.receivers(self._btn_start.clicked)
@@ -558,6 +608,25 @@ class ModePage(QWidget):
                 w.deleteLater()
         self._person_rows.clear()
 
+    def _can_start_system(self) -> bool:
+        if self._sel == 0:
+            return True
+        return len(self._collect_search_targets()[0]) >= 1
+
+    def _apply_button_styles(self):
+        """Her iki buton her zaman görünür; vurguyu işletim durumuna göre verir (Qt disabled kullanılmaz)."""
+        if self._running:
+            self._btn_start.setStyleSheet(_SS_START_NEUTRAL)
+            self._btn_stop.setStyleSheet(_SS_STOP_PROMINENT)
+        else:
+            if self._can_start_system():
+                self._btn_start.setStyleSheet(_SS_START_PROMINENT)
+            else:
+                self._btn_start.setStyleSheet(_SS_START_NEUTRAL)
+            self._btn_stop.setStyleSheet(_SS_STOP_NEUTRAL)
+        self._btn_start.update()
+        self._btn_stop.update()
+
     def _apply_person_area_visual_state(self):
         is_ps = self._sel == 1
         interact = bool(is_ps and not self._running)
@@ -569,55 +638,52 @@ class ModePage(QWidget):
             self._person_sec.setStyleSheet(f"color: {TEXT_3};")
 
     def _update_start_button_state(self):
+        can_go = self._can_start_system()
+
         if self._running:
-            self._btn_start.setEnabled(False)
             self._btn_start.setText("● Aktif")
-            self._btn_stop.setEnabled(True)
+            self._btn_stop.setText("■  Durdur")
             self._summary.setText("Sistem çalışıyor")
             self._summary.setStyleSheet(f"color: {GREEN_GLOW}; background: transparent; padding: 0;")
+            reason = "running"
             state_msg = (
-                f"[MODEPAGE_START_BUTTON_STATE] enabled=false reason=\"running\" "
+                f"[MODEPAGE_START_BUTTON_STATE] running=true can_start_hint={str(can_go).lower()} "
                 f"mode={'GENERAL' if self._sel == 0 else 'PERSON_SEARCH'} cameras={self._get_fixed_camera_ids()}"
             )
-            print(state_msg, flush=True)
-            _mode_log.info(state_msg)
-            self._apply_person_area_visual_state()
-            return
-
-        self._btn_start.setText("▶  Sistemi Başlat")
-        self._btn_stop.setEnabled(False)
-
-        if self._sel == 0:
-            self._btn_start.setEnabled(True)
-            reason = "general_ready"
-            self._summary.setText("Genel İzleme hazır")
-            self._summary.setStyleSheet(f"color: {TEXT_2}; background: transparent; padding: 0;")
         else:
-            ids, names = self._collect_search_targets()
-            can_start = len(ids) >= 1
-            self._btn_start.setEnabled(can_start)
-            if can_start:
-                reason = "person_search_ready"
-                if len(names) <= 3:
-                    label = ", ".join(names)
-                else:
-                    label = ", ".join(names[:3]) + f" +{len(names) - 3}"
-                self._summary.setText(f"Kişi Ara hazır — {label}")
+            self._btn_start.setText("▶  Sistemi Başlat")
+            self._btn_stop.setText("■  Durdur")
+            reason = ""
+            if self._sel == 0:
+                reason = "general_ready"
+                self._summary.setText("Genel İzleme hazır")
                 self._summary.setStyleSheet(f"color: {TEXT_2}; background: transparent; padding: 0;")
             else:
-                reason = "person_required"
-                self._summary.setText("Kişi Ara için en az bir kişi seçin (yüz kaydı olan)")
-                self._summary.setStyleSheet(f"color: {TEXT_3}; background: transparent; padding: 0;")
+                ids, names = self._collect_search_targets()
+                if len(ids) >= 1:
+                    reason = "person_search_ready"
+                    if len(names) <= 3:
+                        label = ", ".join(names)
+                    else:
+                        label = ", ".join(names[:3]) + f" +{len(names) - 3}"
+                    self._summary.setText(f"Kişi Ara hazır — {label}")
+                    self._summary.setStyleSheet(f"color: {TEXT_2}; background: transparent; padding: 0;")
+                else:
+                    reason = "person_required"
+                    self._summary.setText("Kişi Ara için en az bir kişi seçin (yüz kaydı olan)")
+                    self._summary.setStyleSheet(f"color: {TEXT_3}; background: transparent; padding: 0;")
 
-        state_msg = (
-            f"[MODEPAGE_START_BUTTON_STATE] enabled={self._btn_start.isEnabled()} "
-            f"reason=\"{reason}\" mode={'GENERAL' if self._sel == 0 else 'PERSON_SEARCH'} "
-            f"cameras={self._get_fixed_camera_ids()}"
-        )
+            state_msg = (
+                f"[MODEPAGE_START_BUTTON_STATE] running=false can_start={str(can_go).lower()} "
+                f"reason=\"{reason}\" mode={'GENERAL' if self._sel == 0 else 'PERSON_SEARCH'} "
+                f"cameras={self._get_fixed_camera_ids()}"
+            )
+
         print(state_msg, flush=True)
         _mode_log.info(state_msg)
 
         self._apply_person_area_visual_state()
+        self._apply_button_styles()
 
     def _select_mode(self, idx: int):
         self._sel = idx
@@ -625,7 +691,6 @@ class ModePage(QWidget):
             o.set_active(o.idx == idx)
         if idx == 1:
             self._load_persons(preserve_selection=True)
-        self._apply_person_area_visual_state()
         self._update_start_button_state()
 
     def _on_pick_row_clicked(self, pid: int):
@@ -777,6 +842,10 @@ class ModePage(QWidget):
             self._update_start_button_state()
 
     def _start(self):
+        if self._running:
+            QMessageBox.information(self, "SKYWATCH", "Sistem zaten aktif.")
+            return
+
         mode = "GENERAL" if self._sel == 0 else "PERSON_SEARCH"
         cams = list(self._get_fixed_camera_ids())
         options: dict = {}
@@ -823,6 +892,8 @@ class ModePage(QWidget):
         self._update_start_button_state()
 
     def _stop(self):
+        if not self._running:
+            return
         self._running = False
         self.system_stop.emit()
         self._update_start_button_state()

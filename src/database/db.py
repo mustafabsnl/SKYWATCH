@@ -270,6 +270,48 @@ class Database:
                 self.logger.error(f"DB: Embedding okunurken hata - {e}")
             return []
 
+    def get_all_person_embeddings_for_general(self) -> list[dict]:
+        """
+        GENERAL mod için: status filtresiz, embedding'i geçerli olan tüm satırlar.
+        Aynı kişiden birden fazla embedding satırı olabilir; her biri ayrı dict olarak döner.
+        Her candidate'e embedding_hash eklenir (duplicate tespiti için).
+        """
+        import hashlib
+
+        out: list[dict] = []
+        try:
+            with self._get_conn() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    SELECT c.id AS person_id, c.name, c.status, e.embedding
+                    FROM embeddings e
+                    JOIN criminals c ON e.criminal_id = c.id
+                    """
+                )
+                rows = cursor.fetchall()
+            for row in rows:
+                pid = int(row["person_id"])
+                emb = _coerce_embedding(row["embedding"], logger=self.logger, person_id=pid)
+                if emb is None:
+                    continue
+                emb_copy = np.asarray(emb, dtype=np.float32).reshape(-1).copy()
+                emb_hash = hashlib.sha1(emb_copy.tobytes()).hexdigest()[:12]
+                out.append(
+                    {
+                        "person_id": pid,
+                        "name": row["name"] or "",
+                        "status": (row["status"] or ""),
+                        "embedding": emb_copy,
+                        "embedding_hash": emb_hash,
+                    }
+                )
+            return out
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"DB: get_all_person_embeddings_for_general hatası - {e}")
+            return []
+
     def get_embedding(self, criminal_id: int) -> np.ndarray | None:
         """Belirtilen kişinin embedding verisini döndürür."""
         try:
