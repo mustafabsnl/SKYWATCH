@@ -4,13 +4,16 @@ import sys
 import time
 import threading
 import copy
+import logging
+import traceback
+from datetime import datetime
 from pathlib import Path
 
 import cv2
 import numpy as np
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (
-    QMainWindow, QWidget, QHBoxLayout, QStackedWidget, QApplication
+    QMainWindow, QWidget, QHBoxLayout, QStackedWidget, QApplication, QMessageBox
 )
 from PyQt6.QtGui import QFont
 
@@ -32,6 +35,26 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
+_sk_log = logging.getLogger("SKYWATCH")
+
+
+def _options_person_search_ids(options: dict | None) -> list[int]:
+    options = dict(options or {})
+    raw = options.get("target_person_ids")
+    out: list[int] = []
+    if isinstance(raw, (list, tuple)):
+        for x in raw:
+            try:
+                out.append(int(x))
+            except (TypeError, ValueError):
+                continue
+    if not out and options.get("target_person_id") is not None:
+        try:
+            out.append(int(options["target_person_id"]))
+        except (TypeError, ValueError):
+            pass
+    return out
+
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -41,6 +64,24 @@ class MainWindow(QMainWindow):
         self.resize(1440, 900)
         self.setStyleSheet(GLOBAL_STYLE)
         self.statusBar().hide()
+
+        # ── Runtime durumu (lifecycle / logger) ── BEFORE widget creation ──
+        self._cfg = None
+        self._logger = None
+        self._run_logger: RunLogger | None = None
+        self._pipeline = None
+        self._renderer = None
+        self._local_bbox_tracker: LocalBBoxTracker | None = None
+        self._max_active_cameras = 4
+        self._grid_rows = 2
+        self._grid_cols = 2
+
+        # Eagerly create cfg + EventLogger + RunLogger so child widgets can log
+        # (ModePage logs at construction time). If this fails we keep going so the UI
+        # at least appears, but diagnostics will print to stdout.
+        self._ensure_runtime_logging()
+        if self._logger:
+            self._logger.info("[MAIN_RUNTIME_LOGGING_READY]")
 
         # ── Merkezi widget ──────────────────────────────────────────────────
         central = QWidget()
@@ -63,6 +104,28 @@ class MainWindow(QMainWindow):
 
         self.pg_dash = DashboardPage()
         self.pg_mode = ModePage()
+        mp_msg = (
+            f"[MAIN_MODEPAGE_CREATED] object_id={id(self.pg_mode)} "
+            f"type={type(self.pg_mode).__module__}.{type(self.pg_mode).__name__}"
+        )
+        print(mp_msg, flush=True)
+        _sk_log.info(mp_msg)
+        if self._logger:
+            self._logger.info(mp_msg)
+        if self._run_logger:
+            self._run_logger.log_event(
+                "MAIN_MODEPAGE_CREATED",
+                mp_msg,
+                object_id=id(self.pg_mode),
+                type=f"{type(self.pg_mode).__module__}.{type(self.pg_mode).__name__}",
+            )
+
+        # ModePage'e runtime logger'ları geçir — _start() doğrudan run_logger/event_logger'a yazsın
+        try:
+            self.pg_mode.attach_runtime_logger(self._logger, self._run_logger)
+        except Exception as e:
+            print(f"[MAIN_MODEPAGE_ATTACH_LOGGER_FAILED] error={e!s}", flush=True)
+
         self.pg_add  = AddCriminalPage()
         self.pg_list = CriminalListPage()
 
@@ -73,15 +136,32 @@ class MainWindow(QMainWindow):
 
         # ── Bağlantılar ─────────────────────────────────────────────────────
         self.pg_mode.system_start.connect(self._on_start)
+        self.pg_mode.system_start.connect(self._debug_mode_start_signal)
+        sig_msg = (
+            f"[MAIN_SIGNAL_CONNECTED] ModePage.system_start -> MainWindow._on_start "
+            f"(modepage_object_id={id(self.pg_mode)})"
+        )
+        print(sig_msg, flush=True)
+        _sk_log.info(sig_msg)
+        if self._logger:
+            self._logger.info(sig_msg)
+        if self._run_logger:
+            self._run_logger.log_event(
+                "MAIN_SIGNAL_CONNECTED",
+                sig_msg,
+                modepage_object_id=id(self.pg_mode),
+            )
+
         self.pg_mode.system_stop.connect(self._on_stop)
         self.pg_add.person_added.connect(self._on_person_added)
-        self.pg_dash.camera_selection_changed.connect(self._on_dashboard_camera_selection_changed)
-
         # Video oynatma durumu
         self._cam_manager: CameraManager | None = None
         self._video_timer = QTimer(self)
         self._video_timer.timeout.connect(self._display_tick)
         self._selected_cameras = []
+        self._active_mode = None
+        self._active_mode_options = {}
+        self._system_started_from_mode_page = False
         self._display_last_tick = 0.0
         self._display_fps_smooth = 0.0
         self._alerted_tracks: set[tuple[str, int, str]] = set()
@@ -125,43 +205,153 @@ class MainWindow(QMainWindow):
         self._display_timer_interval_ms = int(1000 / self._display_target_fps)
         self._torch_cuda_available = False
 
-        # Tespit/track pipeline (GUI izleme için)
-        self._cfg = None
-        self._logger = None
-        self._pipeline = None
-        self._renderer = None
-        self._local_bbox_tracker: LocalBBoxTracker | None = None
-        self._run_logger: RunLogger | None = None
-        self._max_active_cameras = 4
-        self._grid_rows = 2
-        self._grid_cols = 2
+        # Pipeline / Renderer / LocalBBoxTracker are lazy via _ensure_pipeline();
+        # cfg + EventLogger + RunLogger were already created at the top of __init__.
         self._last_perf_log_ts = 0.0
         self._last_camera_log_ts = 0.0
         self._warn_cooldowns: dict[tuple[str, str], float] = {}
         self._no_signal_since: dict[str, float] = {}
         self._stream_online_since: dict[str, float] = {}
+        self._active_start_watch_gen = 0
 
         # DB sayısını ilk göster
         self._update_db_count()
-        self._sync_dashboard_camera_options()
 
     # ── Navigasyon ────────────────────────────────────────────────────────────
     def _goto(self, index: int):
         self.stack.setCurrentIndex(index)
-        if index == 0:
-            self._sync_dashboard_camera_options()
         if index == 3:
             self.pg_list.refresh()
             self._update_db_count()
 
     # ── Pipeline sinyalleri ──────────────────────────────────────────────────
-    def _on_start(self, mode: str, cameras: list):
+    def _debug_mode_start_signal(self, mode, cameras, options):
+        """Debug: confirms ModePage.system_start reaches MainWindow (see [MAIN_SIGNAL_RECEIVED_DEBUG])."""
+        opt = dict(options or {})
+        msg = f"[MAIN_SIGNAL_RECEIVED_DEBUG] mode={mode} cameras={list(cameras or [])} options={opt}"
+        print(msg, flush=True)
+        _sk_log.info(msg)
+        if self._logger:
+            self._logger.info(msg)
+
+    def _schedule_active_start_watch(self, mode: str, cameras: list):
+        """Task 10: if inference never runs, fail loudly."""
+        self._active_start_watch_gen = int(getattr(self, "_active_start_watch_gen", 0)) + 1
+        gen = self._active_start_watch_gen
+        cams = list(cameras or [])
+
+        def _check():
+            if gen != getattr(self, "_active_start_watch_gen", 0):
+                return
+            if int(getattr(self, "_inference_loop_count", 0) or 0) > 0:
+                return
+            line = (
+                f"[ACTIVE_START_FAILED] reason=inference_loop_count_still_zero mode={mode} "
+                f"selected_cameras={cams} inference_loop_count={getattr(self, '_inference_loop_count', 0)}"
+            )
+            print(line, flush=True)
+            _sk_log.error(line)
+            if self._logger:
+                self._logger.error(line)
+            QMessageBox.warning(
+                self,
+                "SKYWATCH",
+                "Sistem aktif başlatılamadı. Logları kontrol edin.",
+            )
+
+        QTimer.singleShot(2000, _check)
+
+    def _on_start(self, mode: str, cameras: list, options: dict = None):
+        print("[MAIN_ON_START_ENTER]", mode, cameras, options, flush=True)
+
+        mode = str(mode or "GENERAL").upper()
+        if mode not in ("GENERAL", "PERSON_SEARCH"):
+            mode = "GENERAL"
+        options = dict(options or {})
+        cam_list = list(cameras or [])
+
+        _sk_log.info(f"[MAIN_ON_START_ENTER] mode={mode} cameras={cam_list} options={options}")
+
+        if not self._ensure_pipeline():
+            QMessageBox.critical(self, "Hata", "Sistem bileşenleri başlatılamadı. Lütfen logları kontrol edin.")
+            return
+
+        if self._logger:
+            self._logger.info(f"[MAIN_ON_START_ENTER] mode={mode} cameras={cam_list} options={options}")
+
+        self._active_mode = mode
+        self._active_mode_options = dict(options)
+
+        if self._logger:
+            self._logger.info(f"[GUI_ON_START] mode={mode} options={options} cameras={cam_list}")
+
+            if mode == "PERSON_SEARCH":
+                tids = _options_person_search_ids(options)
+                self._logger.info(
+                    f"[PERSON_SEARCH_SELECT] target_person_ids={tids} "
+                    f"name(s)={options.get('target_person_names')!r}"
+                )
+                self._logger.info(f"[PERSON_SEARCH_START] target_person_ids={tids}")
+                self._logger.person_search_trace("UI_MODE_SELECT", mode=mode)
+                self._logger.person_search_trace(
+                    "UI_PERSON_SELECTED",
+                    selected_person_ids=tids,
+                    selected_person_names=options.get("target_person_names"),
+                    selected_person_id=options.get("target_person_id"),
+                    selected_person_name=options.get("target_person_name"),
+                )
+                self._logger.person_search_trace(
+                    "UI_START_REQUEST",
+                    mode=mode,
+                    selected_person_ids=tids,
+                    selected_cameras=cam_list,
+                )
+            elif mode == "GENERAL":
+                self._logger.info(f"[GENERAL_MODE_START] cameras={cam_list}")
+
+        if self._run_logger:
+            ps_ids = _options_person_search_ids(options) if mode == "PERSON_SEARCH" else []
+            self._run_logger.log_system(
+                "runtime_context",
+                active_mode=mode,
+                target_person_id=(
+                    (ps_ids[0] if ps_ids else None) if mode == "PERSON_SEARCH" else None
+                ),
+                target_person_ids=(ps_ids if mode == "PERSON_SEARCH" else None),
+                target_person_names=(
+                    options.get("target_person_names") if mode == "PERSON_SEARCH" else None
+                ),
+                selected_cameras=cam_list,
+                options=options,
+            )
+
+        selected = list(cameras or self.pg_mode.get_camera_ids(only_checked=True))
+        self._alerted_tracks.clear()
+        self._pending_alerts.clear()
+
+        if not self._start_video_mode(selected, mode, options):
+            self._system_started_from_mode_page = False
+            self._active_mode = None
+            self._active_mode_options = {}
+            self.sidebar.set_running(False)
+            self.pg_dash.set_mode("", False)
+            try:
+                self.pg_mode.release_start_after_main_failure()
+            except Exception:
+                pass
+            if self._run_logger:
+                self._run_logger.log_system(
+                    "gui_video_mode_start_failed",
+                    selected_mode="UNKNOWN",
+                    active_mode="UNKNOWN",
+                    options={},
+                )
+            return
+
         self.sidebar.set_running(True)
         self.pg_dash.set_mode(mode, True)
         self.pg_dash.clear_alerts()
-        selected = list(cameras or self.pg_mode.get_camera_ids(only_checked=True))
-        self._start_video_mode(selected)
-        self._sync_dashboard_camera_options(active_only=True)
+
         self._goto(0)
         self.sidebar._select(0)
 
@@ -169,34 +359,139 @@ class MainWindow(QMainWindow):
         self._stop_video_mode()
         self.sidebar.set_running(False)
         self.pg_dash.set_mode("", False)
-        self._sync_dashboard_camera_options()
 
-    def _sync_dashboard_camera_options(self, active_only: bool = False):
-        if active_only and self._selected_cameras:
-            camera_ids = list(self._selected_cameras)
-        else:
-            camera_ids = self.pg_mode.get_camera_ids()
-        self.pg_dash.set_camera_options(camera_ids, self._selected_cameras)
+    def _start_video_mode(self, cameras: list, mode: str = "GENERAL", options: dict = None):
+        mode = str(mode or "GENERAL").upper()
+        if mode not in ("GENERAL", "PERSON_SEARCH"):
+            mode = "GENERAL"
+        options = dict(options or {})
 
-    def _start_video_mode(self, cameras: list):
-        self._ensure_pipeline()
-        self._selected_cameras = self._normalize_selected_cameras(cameras or [])
+        cam_in = list(cameras or [])
+        msg = f"[GUI_VIDEO_MODE_START] mode={mode} cameras={cam_in} options={options}"
         if self._logger:
-            self._logger.info(f"GUI selected cameras: {', '.join(self._selected_cameras)}")
+            self._logger.info(msg)
+        else:
+            print(msg, flush=True)
+
+        if mode == "PERSON_SEARCH":
+            ps_targets = _options_person_search_ids(options)
+            if len(ps_targets) < 1:
+                if self._logger:
+                    self._logger.error(
+                        '[PERSON_SEARCH_START_BLOCKED] reason="missing_target_person_ids_in_mainwindow"'
+                    )
+                QMessageBox.warning(
+                    self,
+                    "Uyarı",
+                    "Kişi Ara modunda en az bir kişi seçmelisiniz.",
+                )
+                return False
+
+        preview_before = (
+            not self._system_started_from_mode_page and self._video_timer.isActive()
+        )
+
+        if not self._ensure_pipeline():
+            return False
+
+        self._system_started_from_mode_page = True
+        pv_msg = f"[PREVIEW_TO_ACTIVE_TRANSITION] from_preview={str(preview_before).lower()} mode={mode}"
+        if self._logger:
+            self._logger.info(pv_msg)
+        else:
+            print(pv_msg, flush=True)
+
+        normalized = self._normalize_selected_cameras(cameras or [])
+        if self._logger:
+            self._logger.info(f"[CAMERA_SELECTION_NORMALIZED] selected_cameras={normalized}")
+
+        if not normalized:
+            self._system_started_from_mode_page = False
+            QMessageBox.warning(self, "Uyarı", "En az bir kamera seçin.")
+            return False
+
+        self._selected_cameras = normalized
+        self._stop_inference_worker()
+        self._sync_camera_sources()
+
+        active_streams = [
+            cid for cid in self._selected_cameras if self._cam_manager and cid in self._cam_manager.streams
+        ]
+        if self._logger:
+            self._logger.info(
+                f"[CAMERA_SYNC_DONE] selected_cameras={self._selected_cameras} active_streams={active_streams}"
+            )
+
+        if self._cam_manager is None or not any(
+            cid in self._cam_manager.streams for cid in self._selected_cameras
+        ):
+            self._system_started_from_mode_page = False
+            QMessageBox.warning(self, "Hata", "Seçilen kameralar için kaynak bulunamadı.")
+            return False
+
         if self._run_logger is not None:
             self._run_logger.log_system(
                 "gui_video_mode_started",
-                selected_mode="GENERAL",
+                selected_mode=mode,
+                active_mode=mode,
                 selected_cameras=self._selected_cameras,
                 max_active_cameras=self._max_active_cameras,
                 layout={"rows": self._grid_rows, "cols": self._grid_cols},
+                options=options,
             )
-        self._sync_camera_sources()
+
+        if self._pipeline:
+            if self._logger:
+                tlist = _options_person_search_ids(options)
+                self._logger.info(
+                    f"[GUI_PIPELINE_SET_MODE_CALL] mode={mode} target_person_ids={tlist} "
+                    f"legacy_target_person_id={options.get('target_person_id')}"
+                )
+
+            if not self._pipeline.set_mode(mode, options):
+                self._system_started_from_mode_page = False
+                QMessageBox.warning(self, "Hata", "Seçilen mod başlatılamadı. Lütfen logları kontrol edin.")
+                return False
+
+            if self._logger:
+                self._logger.info(
+                    f"[PIPELINE_MODE_SET_DONE] mode={mode} current_mode={getattr(self._pipeline, 'current_mode', None)}"
+                )
+
+            if mode == "PERSON_SEARCH" and self._logger:
+                tlist = _options_person_search_ids(options)
+                self._logger.person_search_trace(
+                    "UI_PIPELINE_SET_MODE_CALL",
+                    mode=mode,
+                    target_person_ids=tlist,
+                    target_person_id=options.get("target_person_id"),
+                )
+
+        if self._logger:
+            self._logger.info(f"[INFERENCE_WORKER_START_REQUEST] selected_cameras={self._selected_cameras}")
+
+        self._start_inference_worker()
+
+        if self._logger:
+            self._logger.info("[INFERENCE_WORKER_STARTED]")
+
+        self._start_display_timer()
+
+        if self._logger:
+            self._logger.info(f"[DISPLAY_TIMER_STARTED] interval_ms={getattr(self, '_display_timer_interval_ms', 0)}")
+
+        self._inference_watchdog_timer.start(2000)
+
+        if self._logger:
+            self._logger.info(f"[ACTIVE_SYSTEM_STARTED] mode={mode} cameras={self._selected_cameras}")
+
+        self._schedule_active_start_watch(mode, list(self._selected_cameras))
+
+        return True
+
+    def _start_display_timer(self):
         self._display_last_tick = time.time()
         self._display_fps_smooth = 0.0
-        self._start_inference_worker()
-        if not self._inference_watchdog_timer.isActive():
-            self._inference_watchdog_timer.start(1000)
         perf = self._cfg.performance if self._cfg else {}
         display_fps = int(perf.get("display_fps_gpu", perf.get("display_fps", 15))) if self._torch_cuda_available else int(perf.get("display_fps_cpu", perf.get("display_fps", 12)))
         self._display_target_fps = max(5, min(30, display_fps))
@@ -210,8 +505,53 @@ class MainWindow(QMainWindow):
                 display_timer_interval_ms=ui_interval,
                 torch_cuda_available=self._torch_cuda_available,
             )
-        if not self._video_timer.isActive():
-            self._video_timer.start(ui_interval)
+        if self._video_timer.isActive():
+            self._video_timer.stop()
+        self._video_timer.start(ui_interval)
+
+    def _start_camera_preview_only(self, camera_ids: list):
+        """
+        Dashboard'da sadece ham kamera görüntüsü göstermek için kullanılır.
+        Inference worker başlatmaz. Pipeline mode değiştirmez.
+        """
+        if not self._ensure_pipeline():
+            return
+        self._selected_cameras = self._normalize_selected_cameras(camera_ids or [])
+        if self._logger:
+            self._logger.info(f"[DASH_CAMERA_PREVIEW_START] selected_cameras={self._selected_cameras} reason=\"system_not_started_from_mode_page\"")
+            
+        self._sync_camera_sources()
+        self._start_display_timer()
+        self.sidebar.set_running(False)
+        self.pg_dash.set_mode("PREVIEW", False)
+
+    def _restart_active_system_with_cameras(self, camera_ids: list):
+        self._stop_inference_worker()
+        self._ensure_pipeline()
+        self._selected_cameras = self._normalize_selected_cameras(camera_ids or [])
+        self._sync_camera_sources()
+        self._inference_round_robin_idx = 0
+        
+        mode = self._active_mode or "GENERAL"
+        opts = dict(self._active_mode_options or {})
+        
+        if self._logger:
+            self._logger.info(f"[DASH_CAMERA_SELECTION_CHANGED] preserve_mode={mode} options={opts}")
+            self._logger.info(
+                f"[DASH_PIPELINE_MODE_REAPPLY] mode={mode} target_person_ids="
+                f"{_options_person_search_ids(opts)} legacy_id={opts.get('target_person_id')}"
+            )
+            
+        self.pg_dash.set_mode(mode, True)
+        if self._pipeline:
+            if not self._pipeline.set_mode(mode, opts):
+                if self._logger:
+                    self._logger.error(f"[DASH_PIPELINE_MODE_REAPPLY_FAILED] mode={mode}")
+                return
+            
+        self._start_inference_worker()
+        self._start_display_timer()
+        self.sidebar.set_running(True)
 
     def _stop_video_mode(self):
         if self._inference_watchdog_timer.isActive():
@@ -235,6 +575,9 @@ class MainWindow(QMainWindow):
             self._run_logger.log_system("gui_video_mode_stopped", selected_cameras=self._selected_cameras)
         self.pg_dash.update_stats(0.0, 0, 0, 0)
         self.pg_dash.clear_frame()
+        self._system_started_from_mode_page = False
+        self._active_mode = None
+        self._active_mode_options = {}
 
     def _camera_source_map(self) -> dict:
         allowed_ids = set()
@@ -263,9 +606,10 @@ class MainWindow(QMainWindow):
             return
         self._cam_manager = CameraManager(config=self._cfg, logger=self._logger, autoload_config=False)
 
-    def _ensure_pipeline(self):
-        if self._pipeline is not None and self._renderer is not None:
-            return
+    def _ensure_runtime_logging(self) -> bool:
+        """Initialize cfg + EventLogger + RunLogger early so any widget can log."""
+        if self._cfg is not None and self._logger is not None:
+            return True
         try:
             self._cfg = AppConfig()
             self._max_active_cameras = self._cfg.get_max_active_cameras()
@@ -276,26 +620,66 @@ class MainWindow(QMainWindow):
             if self._cfg.logging.get("enable_run_logging", True):
                 self._run_logger = RunLogger(self._cfg, self._logger)
                 self._logger.set_run_logger(self._run_logger)
+            return True
+        except Exception as e:
+            tb = traceback.format_exc()
+            print(f"[RUNTIME_LOGGING_INIT_FAILED] error={e!s} traceback={tb}", flush=True)
+            return False
+
+    def _ensure_pipeline(self) -> bool:
+        if self._pipeline is not None and self._renderer is not None:
+            return True
+        try:
+            if not self._ensure_runtime_logging():
+                return False
             self._pipeline = Pipeline(self._cfg, self._logger)
             self._local_bbox_tracker = LocalBBoxTracker(self._cfg.tracking, logger=self._logger)
             try:
                 debug_cfg = self._cfg.get("debug", {}) or {}
+                overlay_cfg = self._cfg.get("overlay", {}) or {}
                 dedup_iou = float(debug_cfg.get("overlay_dedup_iou", 0.45))
                 draw_predicted_tracks = bool(debug_cfg.get("draw_predicted_tracks", False))
+                fallback_suppress_center_factor = float(overlay_cfg.get("fallback_suppress_center_factor", 0.90))
+                fallback_suppress_min_center_px = float(overlay_cfg.get("fallback_suppress_min_center_px", 40))
+                fallback_suppress_iou = float(overlay_cfg.get("fallback_suppress_iou", 0.20))
             except Exception:
                 dedup_iou = 0.45
                 draw_predicted_tracks = False
-            self._renderer = OverlayRenderer(dedup_iou=dedup_iou, draw_predicted_tracks=draw_predicted_tracks)
+                fallback_suppress_center_factor = 0.90
+                fallback_suppress_min_center_px = 40.0
+                fallback_suppress_iou = 0.20
+            self._renderer = OverlayRenderer(
+                dedup_iou=dedup_iou,
+                draw_predicted_tracks=draw_predicted_tracks,
+                fallback_suppress_center_factor=fallback_suppress_center_factor,
+                fallback_suppress_min_center_px=fallback_suppress_min_center_px,
+                fallback_suppress_iou=fallback_suppress_iou,
+            )
             try:
                 import torch
                 self._torch_cuda_available = bool(torch.cuda.is_available())
             except Exception:
                 self._torch_cuda_available = False
-        except Exception:
+                
+            self._ensure_camera_manager()
+            return True
+            
+        except Exception as e:
+            tb = traceback.format_exc()
+            err_msg = f"[PIPELINE_INIT_FAILED] error={e!s} traceback={tb}"
+            _sk_log.error(err_msg)
+            if self._logger:
+                self._logger.error(err_msg)
+            else:
+                print(err_msg, flush=True)
+
+            if self._run_logger:
+                self._run_logger.log_error("PIPELINE_INIT_FAILED", e)
+                
             self._pipeline = None
             self._renderer = None
             self._local_bbox_tracker = None
-        self._ensure_camera_manager()
+            return False
 
     def _warn_with_cooldown(self, event_name: str, camera_id: str, message: str, cooldown_sec: float = 5.0, **fields):
         now = time.time()
@@ -395,63 +779,6 @@ class MainWindow(QMainWindow):
                 added_stream_ids=sorted(added_stream_ids),
             )
 
-    def _on_dashboard_camera_selection_changed(self, camera_ids: list):
-        """Dashboard'da kamera seçimi değiştiğinde çağrılır."""
-        new_selection = self._normalize_selected_cameras(list(camera_ids or []))
-        old_selection = list(self._selected_cameras)
-
-        # Aynı set ise hiçbir şey yapma
-        if set(new_selection) == set(old_selection):
-            return
-
-        self._selected_cameras = new_selection
-
-        if self._selected_cameras:
-            # Worker'ı durdur → kamera kaynaklarını güncelle → yeniden başlat
-            self._stop_inference_worker()
-            self._ensure_pipeline()
-            self._sync_camera_sources()
-            self._inference_round_robin_idx = 0
-
-            # UI timer başlat
-            self._display_last_tick = time.time()
-            self._display_fps_smooth = 0.0
-            perf = self._cfg.performance if self._cfg else {}
-            display_fps = int(perf.get("display_fps_gpu", perf.get("display_fps", 15))) if self._torch_cuda_available else int(perf.get("display_fps_cpu", perf.get("display_fps", 12)))
-            self._display_target_fps = max(5, min(30, display_fps))
-            ui_interval = int(1000 / self._display_target_fps)
-            self._display_timer_interval_ms = ui_interval
-            if self._run_logger is not None:
-                self._run_logger.log_event(
-                    "DISPLAY_TIMER_CONFIG",
-                    "Display timer configured after camera selection change",
-                    display_target_fps=self._display_target_fps,
-                    display_timer_interval_ms=ui_interval,
-                    torch_cuda_available=self._torch_cuda_available,
-                )
-            if self._video_timer.isActive():
-                self._video_timer.stop()
-            self._video_timer.start(ui_interval)
-            self.sidebar.set_running(True)
-            self.pg_dash.set_mode("GENERAL", True)
-
-            # Worker'ı temiz şekilde başlat
-            self._start_inference_worker()
-        else:
-            # Hiç kamera seçili değil → her şeyi durdur
-            self._stop_inference_worker()
-            if self._inference_watchdog_timer.isActive():
-                self._inference_watchdog_timer.stop()
-            if self._video_timer.isActive():
-                self._video_timer.stop()
-            if self._cam_manager is not None:
-                self._cam_manager.stop_all()
-            self._last_cam_frames.clear()
-            self.pg_dash.update_stats(0.0, 0, 0, 0)
-            self.pg_dash.clear_frame()
-            self.sidebar.set_running(False)
-            self.pg_dash.set_mode("", False)
-
     def _start_inference_worker(self):
         if self._inference_thread is not None and self._inference_thread.is_alive():
             if self._run_logger is not None:
@@ -473,6 +800,7 @@ class MainWindow(QMainWindow):
                 inference_fps_total=round(1.0 / self._get_inference_sleep(), 3),
             )
         self._inference_running = True
+        self._inference_loop_count = 0
         self._inference_last_heartbeat_ts = time.time()
         self._inference_thread = threading.Thread(target=self._inference_loop, daemon=True, name="InferenceWorker")
         self._inference_thread.start()
@@ -639,6 +967,12 @@ class MainWindow(QMainWindow):
                         )
                     self._inference_running = False
                     break
+            
+            # Rate limiting
+            elapsed = time.time() - loop_t0
+            sleep_time = max(0.001, self._get_inference_sleep() - elapsed)
+            time.sleep(sleep_time)
+
         if self._run_logger is not None:
             self._run_logger.log_event(
                 "INFERENCE_LOOP_EXIT",
@@ -663,8 +997,15 @@ class MainWindow(QMainWindow):
             time.sleep(0.02)
             return
 
+        if self._inference_loop_count < 5:
+            print(f"[INFERENCE_LOOP_ONCE] loop={self._inference_loop_count} selected={selected}")
+
         cam_id = selected[self._inference_round_robin_idx % len(selected)]
         self._inference_round_robin_idx += 1
+
+        if self._inference_loop_count < 5:
+            print(f"[INFERENCE_CAMERA_PICK] camera_id={cam_id}")
+
         stream = self._cam_manager.streams.get(cam_id)
         if stream is None:
             self._warn_with_cooldown("INFERENCE_SKIP_NO_STREAM", cam_id, "Inference skipped: no stream")
@@ -675,6 +1016,9 @@ class MainWindow(QMainWindow):
             self._warn_with_cooldown("INFERENCE_SKIP_NO_FRAME", cam_id, "Inference skipped: stream returned no frame")
             time.sleep(0.005)
             return
+
+        if self._inference_loop_count < 5:
+            print(f"[INFERENCE_FRAME_OK] camera_id={cam_id} shape={frame.shape}")
 
         proc_frame, scale_info = self._prepare_inference_frame(frame)
         process_t0 = time.time()
@@ -718,7 +1062,8 @@ class MainWindow(QMainWindow):
             if d.criminal_id not in criminal_names:
                 info = self._pipeline.db.get_criminal_info(d.criminal_id)
                 criminal_names[d.criminal_id] = (info or {}).get("name", "")
-            if d.status in ("WANTED", "CRIMINAL"):
+            if d.status in ("WANTED", "CRIMINAL", "HEDEF BULUNDU", "TARGET_FOUND"):
+                # TARGET_FOUND / HEDEF BULUNDU / WANTED / CRIMINAL → dashboard alert
                 key = (cam_id, d.track_id, d.status)
                 if key not in self._alerted_tracks:
                     self._alerted_tracks.add(key)
@@ -768,6 +1113,23 @@ class MainWindow(QMainWindow):
                     inference_last_success_age_sec=round(inference_last_success_age_sec, 3),
                     inference_last_heartbeat_age_sec=round(inference_last_heartbeat_age_sec, 3),
                     inference_error_count=self._inference_error_count,
+                    active_mode=self._active_mode or (self._pipeline.current_mode if self._pipeline else "UNKNOWN"),
+                    target_person_id=(
+                        (
+                            _options_person_search_ids(self._active_mode_options)[0]
+                            if _options_person_search_ids(self._active_mode_options)
+                            else self._active_mode_options.get("target_person_id")
+                        )
+                        if (self._active_mode == "PERSON_SEARCH" and self._active_mode_options)
+                        else None
+                    ),
+                    target_person_ids=(
+                        _options_person_search_ids(self._active_mode_options)
+                        if (self._active_mode == "PERSON_SEARCH" and self._active_mode_options)
+                        else None
+                    ),
+                    total_faces_scanned=int(self._pipeline.stats.get("total_faces_scanned", 0)),
+                    total_matches=int(self._pipeline.stats.get("total_matches", 0)),
                 )
                 profile_payload = dict(profile)
                 profile_payload.pop("camera_id", None)
@@ -977,12 +1339,38 @@ class MainWindow(QMainWindow):
                 display_canvas_height=int((self._cfg.performance or {}).get("display_canvas_height", 720)) if self._cfg else 720,
                 display_frame_count=self._display_frame_count,
                 cam_count=len(self._selected_cameras),
-                total_faces_scanned=total_faces,
+                total_faces_scanned=int(self._pipeline.stats.get("total_faces_scanned", total_faces)) if self._pipeline else total_faces,
+                total_matches=int(self._pipeline.stats.get("total_matches", 0)) if self._pipeline else 0,
                 total_alerts=total_alerts,
                 perf_level=self._perf_level,
                 proc_ewma_ms=round(self._proc_ewma_ms, 3),
             )
             self._last_perf_log_ts = now
+            
+        # ─── PERSON SEARCH 1-SECOND SUMMARY LOG ───
+        if self._pipeline and self._pipeline.current_mode == "PERSON_SEARCH":
+            if not hasattr(self, "_ps_last_summary_ts"):
+                self._ps_last_summary_ts = 0.0
+                
+            if now - self._ps_last_summary_ts >= 1.0:
+                self._ps_last_summary_ts = now
+                if self._logger:
+                    stats = self._pipeline.stats
+                    self._logger.person_search_trace(
+                        "SYSTEM_SUMMARY_1S",
+                        mode="PERSON_SEARCH",
+                        target_ids=list(getattr(self._pipeline, "target_person_ids", []) or []),
+                        target_id=getattr(self._pipeline, "target_person_id", None),
+                        has_embedding=bool(
+                            getattr(self._pipeline, "_person_search_embeddings", None)
+                        ),
+                        cameras=str(self._selected_cameras),
+                        display_fps=round(self._display_fps_smooth, 1),
+                        active_tracks=active_total,
+                        reid_hits=stats.get("reid_hits", 0),
+                        total_faces=total_faces,
+                        total_alerts=total_alerts,
+                    )
 
     def _compose_grid(self, frames: list, cam_ids: list[str]):
         if len(frames) == 1:

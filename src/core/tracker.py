@@ -55,6 +55,8 @@ class Tracker:
         self.max_lost_age = config.get("max_lost_age", 30)  # ByteTrack: Lost havuzunda kaç frame beklesin
         self.min_conf_emb = float(config.get("min_conf_emb", _MIN_CONF_EMB_DEFAULT))
         self.draw_tentative_tracks = bool(config.get("draw_tentative_tracks", True))
+        self.render_stale_deepsort_tracks = bool(config.get("render_stale_deepsort_tracks", True))
+        self.max_render_time_since_update = int(config.get("max_render_time_since_update", 0) or 0)
         self.allow_no_embedding_fallback = bool(config.get("allow_no_embedding_fallback", True))
         self.no_embedding_fallback_mode = str(config.get("no_embedding_fallback_mode", "raw"))
         self.bbox_prediction_enabled = bool(config.get("bbox_prediction_enabled", True))
@@ -155,6 +157,10 @@ class Tracker:
             "tracker_confirmed_tracks": 0,
             "tracker_tentative_tracks": 0,
             "tracker_output_tracks": 0,
+            "tracker_stale_tracks_seen": 0,
+            "tracker_stale_tracks_suppressed": 0,
+            "tracker_renderable_tracks": 0,
+            "tracker_time_since_update_gt0": 0,
             "tracker_backend": "deepsort",
             "tracker_embedding_cache_hits": 0,
             "tracker_embedding_cache_updates": 0,
@@ -247,6 +253,14 @@ class Tracker:
             if not is_confirmed and not self.draw_tentative_tracks:
                 continue
 
+            tsu = int(getattr(rt, "time_since_update", 0) or 0)
+            if tsu > 0:
+                debug["tracker_stale_tracks_seen"] += 1
+                debug["tracker_time_since_update_gt0"] += 1
+            if (not self.render_stale_deepsort_tracks) and tsu > self.max_render_time_since_update:
+                debug["tracker_stale_tracks_suppressed"] += 1
+                continue
+
             track_id = rt.track_id
             track_key = (camera_id, track_id)
 
@@ -299,7 +313,7 @@ class Tracker:
                 is_new=is_new,
                 age=rt.age,
                 is_confirmed=is_confirmed,
-                time_since_update=rt.time_since_update,
+                time_since_update=tsu,
                 face_embedding=matched_embedding,
                 criminal_match=self._criminal_matches.get(track_key),
                 camera_id=camera_id,
@@ -308,6 +322,7 @@ class Tracker:
                 prediction_age_sec=0.0,
             )
             results.append(track)
+            debug["tracker_renderable_tracks"] += 1
             seen_track_keys.add(track_key)
             self._update_motion_state(track_key, bbox, matched_embedding, face_score=1.0, source=track.source)
 

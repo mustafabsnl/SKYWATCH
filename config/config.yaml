@@ -9,6 +9,10 @@ cameras:
   layout:
     rows: 1
     cols: 2
+  # Mod ekranı sabit aktif kamera listesi (UI’da seçim yok). Boşsa enabled + max_active kullanılır.
+  runtime_fixed_camera_ids:
+    - "CAM_01"
+    - "CAM_03"
   items:
     - id: "CAM_01"
       name: "Kamera 1"
@@ -85,6 +89,11 @@ face:
   similarity_threshold: 0.3             # Dusuruldu (0.45 gercek dunyu icin cok kati)
   min_face_size: 30                      # 30px altindaki yuzleri yoksay (telefon ekrani vb.)
   scan_interval_ms: 500                  # Tarama araligi (ms)
+  duplicate_check:
+    enabled: true
+    cosine_threshold: 0.62
+    uncertain_low: 0.52
+    min_face_confidence: 0.60
 
 # --- DeepSORT Tracking Ayarları ---
 tracking:
@@ -92,13 +101,15 @@ tracking:
   min_hits: 1                            # Tentative trackler hızlı görünür
   iou_threshold: 0.3                     # Kalabalık sahneler için IOU eşiği
   draw_tentative_tracks: true
+  render_stale_deepsort_tracks: false
+  max_render_time_since_update: 0
 
   # --- BBox Prediction (kayıp frame için kısa ömürlü tahmin) ---
   bbox_prediction_enabled: true
   prediction_render_enabled: false      # Prediction state tutulur; production overlay'e girmez
-  prediction_update_existing_bbox: true
+  prediction_update_existing_bbox: false  #bu kritik Üretilen tahminin, mevcut track objesinin kutu koordinatlarını doğrudan güncellemesine izin verir.
   max_prediction_gap_sec: 0.20          # 0.20 sn'den uzun süre tahmin yok
-  max_prediction_missed_frames: 2        # 2 ardışık miss sonrası tahmin durur
+  max_prediction_missed_frames: 3        # 2 ardışık miss sonrası tahmin durur
   keep_lost_tracks_for_sec: 0.55         # Lost state kısa süre hafızada kalsın (reacquire için)
 
   bbox_prediction_max_velocity_px_per_sec: 1200  # Daha kısıtlı hız → çok uzaktaki tahminler iptal
@@ -109,13 +120,17 @@ tracking:
   predicted_min_confidence: 0.40
   local_tracker_enabled: true
   local_tracker_method: "klt"
-  local_tracker_max_points: 40
-  local_tracker_quality: 0.01
-  local_tracker_min_distance: 4
-  local_tracker_min_points: 6
+  local_tracker_max_points: 60
+  local_tracker_quality: 0.005
+  local_tracker_min_distance: 3
+  local_tracker_min_points: 4
   local_tracker_max_lost_frames: 3
-  local_tracker_max_shift_px: 80
+  local_tracker_max_shift_px: 120
   local_tracker_reinit_on_detection: true
+  local_tracker_reinit_min_iou_change: 0.15
+  local_tracker_roi_expand_ratio: 0.45
+  local_tracker_use_grid_fallback: true
+  local_tracker_grid_size: 3
   detection_snap_alpha: 1.0
 
   # --- Re-acquire (lost → live geri dönüş) ---
@@ -252,12 +267,34 @@ debug:
   overlay_dedup_enabled: true            # Final decisions çizilmeden önce öncelik tabanlı NMS
   overlay_dedup_iou: 0.45                # Duplicate overlay eşik değeri
   predicted_label_text: "TRACKING"       # Production'da PREDICTED yerine kullanılacak etiket
+  
+  # Person Search moduna özel teşhis ayarları
+  person_search_trace_enabled: true
+  person_search_trace_level: "verbose"
+  person_search_log_every_n_frames: 10
+  person_search_log_all_scores: true
+  person_search_log_track_gates: true
+  person_search_log_renderer_filter: true
+  person_search_jsonl_enabled: true
+  person_search_jsonl_file: "person_search_trace.jsonl"
+  person_search_text_file: "person_search_trace.log"
 
 overlay:
-  limit_faces_enabled: false
-  max_faces_per_camera: null
   draw_all_unique_faces: true
   one_box_per_identity: true
+  limit_faces_enabled: false
+  max_faces_per_camera: null
+  draw_orphan_fallback_only: true
+  fallback_min_hits_to_draw: 2
+  near_duplicate_enabled: true
+  near_duplicate_center_factor: 0.85
+  near_duplicate_min_center_px: 35
+  near_duplicate_size_ratio_min: 0.50
+  near_duplicate_size_ratio_max: 2.00
+  near_duplicate_vertical_factor: 0.90
+  fallback_suppress_center_factor: 0.90
+  fallback_suppress_min_center_px: 40
+  fallback_suppress_iou: 0.20
   suppress_raw_if_track_exists: true
   suppress_predicted_if_real_detection_exists: true
   draw_orphan_raw_faces: true

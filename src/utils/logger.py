@@ -48,6 +48,18 @@ class EventLogger:
     def set_run_logger(self, run_logger):
         """RunLogger köprüsü ekler; EventLogger loglarını run klasörüne yansıtır."""
         self._run_logger = run_logger
+        
+        if self._run_logger and hasattr(self._run_logger, "run_dir"):
+            run_dir = str(self._run_logger.run_dir)
+            self.info(f"[RUN_LOG_DIR_READY] run_id={self._run_logger.run_id} run_dir=\"{run_dir}\"")
+            
+            cfg = self._config.get("debug", {})
+            if bool(cfg.get("person_search_trace_enabled", False)):
+                jsonl_file = cfg.get("person_search_jsonl_file", "person_search_trace.jsonl")
+                txt_file = cfg.get("person_search_text_file", "person_search_trace.log")
+                j_path = self._resolve_log_output_path(jsonl_file)
+                t_path = self._resolve_log_output_path(txt_file) if txt_file else None
+                self.info(f"[PERSON_SEARCH_TRACE_READY] jsonl=\"{j_path}\" text=\"{t_path}\"")
 
     def _mirror_event(self, event_type: str, message: str, level: str = "INFO", **fields):
         if self._run_logger is None:
@@ -168,3 +180,61 @@ class EventLogger:
         """Debug logu."""
         self._logger.debug(message)
         self._mirror_event("DEBUG", message, level="DEBUG")
+
+    def _resolve_log_output_path(self, configured_path: str) -> Path:
+        """
+        RunLogger aktifse dosyayı run klasörünün içine yazar.
+        Config içinde logs/person_search_trace.jsonl gibi global path verilmişse
+        sadece dosya adını alır ve aktif run klasörüne taşır.
+        """
+        if self._run_logger is not None and hasattr(self._run_logger, "resolve_run_path"):
+            return self._run_logger.resolve_run_path(configured_path)
+            
+        p = Path(configured_path)
+        # Eğer config'de sadece dosya adı varsa, diagnostics klasörüne atalım (run_logger yoksa)
+        if str(p.parent) == "." or not str(p.parent):
+            return self._config.project_root / "logs" / "diagnostics" / p.name
+            
+        return self._config.project_root / configured_path
+
+    def person_search_trace(self, event: str, **fields):
+        """
+        Person Search (Kişi Ara) moduna özel teşhis ve izleme logu yazar.
+        Sistemi yavaşlatmamak için JSONL (ve isterseniz ayrı TEXT) formatında yazar.
+        """
+        cfg = self._config.get("debug", {})
+        if not bool(cfg.get("person_search_trace_enabled", False)):
+            return
+            
+        import json
+        
+        ts = datetime.now().isoformat()
+        log_data = {"ts": ts, "event": event, **fields}
+        
+        # 1. Ana events.log'a sadece kısa metin yaz (opsiyonel ama isteniyor)
+        fields_str = " ".join(f"{k}={v}" for k, v in fields.items())
+        msg = f"[{event}] {fields_str}"
+        self._logger.debug(msg) # events.log'a yazar (DEBUG seviyesinde)
+
+        # 2. JSONL log
+        if bool(cfg.get("person_search_jsonl_enabled", True)):
+            jsonl_file = cfg.get("person_search_jsonl_file", "person_search_trace.jsonl")
+            jsonl_path = self._resolve_log_output_path(jsonl_file)
+            try:
+                jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(jsonl_path, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(log_data) + "\n")
+            except Exception as e:
+                self._logger.error(f"Failed to write person_search jsonl trace: {e}")
+
+        # 3. TEXT log
+        txt_file = cfg.get("person_search_text_file", "person_search_trace.log")
+        if txt_file:
+            txt_path = self._resolve_log_output_path(txt_file)
+            try:
+                txt_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(txt_path, "a", encoding="utf-8") as f:
+                    f.write(f"[{ts}] {msg}\n")
+            except Exception as e:
+                pass
+

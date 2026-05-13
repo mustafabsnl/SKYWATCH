@@ -77,6 +77,22 @@ class RunLogger:
         self._start_writer()
         self._log_startup_context()
 
+    @property
+    def run_dir_path(self) -> Path:
+        return self.run_dir
+        
+    def get_run_dir(self) -> Path:
+        return self.run_dir
+        
+    def resolve_run_path(self, filename: str) -> Path:
+        """
+        Aktif run klasörü içinde filename için güvenli dosya yolu döndürür.
+        filename sadece dosya adı veya relative path olabilir.
+        Absolute path verilirse bile güvenli şekilde run klasörüne normalize edilir.
+        """
+        name = Path(filename).name
+        return self.run_dir / name
+
     def _start_writer(self):
         if not self.enabled:
             return
@@ -152,6 +168,63 @@ class RunLogger:
                 f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
     def log_system(self, message: str, **fields):
+        """Updates _last_metrics keys used by summary.json (active_mode, target_person_id, selected_cameras)."""
+        # Merge canonical mode from either field (GUI uses active_mode in runtime_context)
+        mode = fields.get("active_mode")
+        if mode is None:
+            mode = fields.get("selected_mode")
+        if mode is not None:
+            self._last_metrics["active_mode"] = mode
+            if mode != "PERSON_SEARCH":
+                self._last_metrics["target_person_id"] = None
+                self._last_metrics["target_person_ids"] = []
+
+        if "selected_cameras" in fields:
+            self._last_metrics["selected_cameras"] = list(fields["selected_cameras"] or [])
+
+        ps_context = (
+            mode == "PERSON_SEARCH"
+            or fields.get("selected_mode") == "PERSON_SEARCH"
+            or fields.get("active_mode") == "PERSON_SEARCH"
+        )
+
+        def _as_int_ids(xs) -> list[int]:
+            out: list[int] = []
+            if not isinstance(xs, (list, tuple)):
+                return out
+            for x in xs:
+                try:
+                    out.append(int(x))
+                except (TypeError, ValueError):
+                    continue
+            return out
+
+        if isinstance(fields.get("target_person_ids"), (list, tuple)) and ps_context:
+            clean = _as_int_ids(fields["target_person_ids"])
+            if clean:
+                self._last_metrics["target_person_ids"] = clean
+                self._last_metrics["target_person_id"] = clean[0]
+
+        tid = fields.get("target_person_id")
+        if tid is not None:
+            self._last_metrics["target_person_id"] = tid
+
+        opts = fields.get("options")
+        if isinstance(opts, dict) and ps_context:
+            ot = opts.get("target_person_ids")
+            if isinstance(ot, (list, tuple)):
+                clean = _as_int_ids(ot)
+                if clean:
+                    self._last_metrics["target_person_ids"] = clean
+                    self._last_metrics["target_person_id"] = clean[0]
+            if opts.get("target_person_id") is not None and not self._last_metrics.get("target_person_ids"):
+                try:
+                    lone = int(opts["target_person_id"])
+                    self._last_metrics["target_person_id"] = lone
+                    self._last_metrics["target_person_ids"] = [lone]
+                except (TypeError, ValueError):
+                    pass
+
         self._enqueue("system", self._base_record("system", "INFO", message, fields))
 
     def log_event(self, event_type: str, message: str, **fields):
@@ -314,12 +387,23 @@ class RunLogger:
         avg_loop = sum(self._loop_ms_samples) / len(self._loop_ms_samples) if self._loop_ms_samples else 0.0
         max_loop = max(self._loop_ms_samples) if self._loop_ms_samples else 0.0
         min_fps = min(self._perf_samples) if self._perf_samples else 0.0
+        
+        debug_cfg = self.config.get("debug", {}) if hasattr(self.config, "get") else {}
+        ps_enabled = bool(debug_cfg.get("person_search_trace_enabled", False))
+        ps_path = str(self.resolve_run_path(debug_cfg.get("person_search_jsonl_file", "person_search_trace.jsonl"))) if ps_enabled else None
+        
         return {
             "run_id": self.run_id,
             "start_time": self.start_iso,
             "end_time": datetime.now().isoformat(timespec="seconds"),
             "duration_sec": round(duration, 3),
+            "run_dir": str(self.run_dir),
             "selected_cameras": self._last_metrics.get("selected_cameras", []),
+            "active_mode": self._last_metrics.get("active_mode", "UNKNOWN"),
+            "target_person_id": self._last_metrics.get("target_person_id", None),
+            "target_person_ids": self._last_metrics.get("target_person_ids", []),
+            "person_search_trace_enabled": ps_enabled,
+            "person_search_trace_path": ps_path,
             "max_active_cameras": self.config.get_max_active_cameras(),
             "avg_fps": round(avg_fps, 3),
             "min_fps": round(min_fps, 3),

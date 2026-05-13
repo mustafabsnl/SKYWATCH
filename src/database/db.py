@@ -32,6 +32,77 @@ sqlite3.register_adapter(np.ndarray, adapt_array)
 sqlite3.register_converter("array", convert_array)
 
 
+def _coerce_embedding(value, logger=None, person_id="unknown") -> np.ndarray | None:
+    """
+    SQLite'tan gelen embedding değerini güvenli şekilde np.ndarray'e çevirir.
+    """
+    if logger:
+        logger.person_search_trace("EMBEDDING_COERCE_BEGIN", person_id=person_id, source_type=type(value).__name__)
+        
+    if value is None:
+        if logger:
+            logger.person_search_trace("EMBEDDING_COERCE_FAIL", person_id=person_id, reason="value_is_none")
+        return None
+
+    try:
+        if isinstance(value, np.ndarray):
+            arr = value
+            source_type = "ndarray"
+        elif isinstance(value, memoryview):
+            arr = np.load(io.BytesIO(value.tobytes()), allow_pickle=False)
+            source_type = "memoryview"
+        elif isinstance(value, (bytes, bytearray)):
+            arr = np.load(io.BytesIO(value), allow_pickle=False)
+            source_type = "bytes"
+        else:
+            if logger:
+                logger.warning(f"[EMBEDDING_SKIP] person_id={person_id} reason='parse_error' type='{type(value)}'")
+            return None
+    except Exception as e:
+        if logger:
+            logger.warning(f"[EMBEDDING_SKIP] person_id={person_id} reason='parse_error' error='{e}'")
+        return None
+
+    try:
+        arr = np.asarray(arr, dtype=np.float32).reshape(-1)
+    except Exception as e:
+        if logger:
+            logger.warning(f"[EMBEDDING_SKIP] person_id={person_id} reason='reshape_error' error='{e}'")
+        return None
+
+    if arr.shape != (512,):
+        if logger:
+            logger.warning(f"[EMBEDDING_SKIP] person_id={person_id} reason='invalid_shape' shape={arr.shape}")
+        return None
+
+    if not np.isfinite(arr).all():
+        if logger:
+            logger.warning(f"[EMBEDDING_SKIP] person_id={person_id} reason='nan_or_inf'")
+        return None
+
+    norm = np.linalg.norm(arr)
+    if norm < 1e-8:
+        if logger:
+            logger.warning(f"[EMBEDDING_SKIP] person_id={person_id} reason='zero_norm'")
+        return None
+
+    arr = arr / norm
+    
+    if logger:
+        logger.person_search_trace(
+            "EMBEDDING_COERCE_OK", 
+            person_id=person_id, 
+            shape=str(arr.shape), 
+            dtype=str(arr.dtype), 
+            norm_before=f"{norm:.3f}", 
+            norm_after=f"{np.linalg.norm(arr):.3f}"
+        )
+        # logger.debug(f"[EMBEDDING_COERCE] person_id={person_id} source_type={source_type} shape={arr.shape}")
+        
+    return arr
+
+
+
 class Database:
     """Tüm veritabanı işlemlerini yöneten sınıf."""
 
@@ -179,21 +250,175 @@ class Database:
         try:
             with self._get_conn() as conn:
                 cursor = conn.cursor()
-                # Sadece ARANIYOR (WANTED) veya SABIKALI (CRIMINAL) detaylara sahip olanları çek.
-                # Durumu TEMIZ (CLEARED) olanları sorgulamaya gerek yok.
+                # GENERAL mode compares every valid live face against all saved embeddings.
                 cursor.execute("""
                     SELECT e.criminal_id, e.embedding 
                     FROM embeddings e
                     JOIN criminals c ON e.criminal_id = c.id
-                    WHERE c.status IN ('WANTED', 'CRIMINAL')
                 """)
                 
                 rows = cursor.fetchall()
                 # (criminal_id, numpy_dizisi) formatında liste
-                return [(row[0], row[1]) for row in rows]
+                embeddings: list[tuple[int, np.ndarray]] = []
+                for row in rows:
+                    emb = _coerce_embedding(row[1], logger=self.logger, person_id=row[0])
+                    if emb is not None:
+                        embeddings.append((row[0], emb))
+                return embeddings
         except Exception as e:
-            self.logger.error(f"DB: Embedding okunurken hata - {e}")
+            if self.logger:
+                self.logger.error(f"DB: Embedding okunurken hata - {e}")
             return []
+
+    def get_embedding(self, criminal_id: int) -> np.ndarray | None:
+        """Belirtilen kişinin embedding verisini döndürür."""
+        try:
+            with self._get_conn() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT embedding FROM embeddings WHERE criminal_id = ?", (criminal_id,))
+                row = cursor.fetchone()
+                if row and row[0] is not None:
+                    return _coerce_embedding(row[0], logger=self.logger, person_id=criminal_id)
+                return None
+        except Exception as e:
+            self.logger.error(f"DB: get_embedding hatası - {e}")
+            return None
+
+    def get_person_embedding_for_search(self, person_id: int) -> dict | None:
+        """
+        Kişi Ara modunda seçilen kişinin detaylı bilgilerini ve güvenli embedding'ini getirir.
+        """
+        self.logger.person_search_trace("DB_PERSON_SEARCH_QUERY", person_id=person_id)
+        try:
+            with self._get_conn() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT c.id, c.name, c.crime_type, c.danger_level, c.status, e.embedding
+                    FROM criminals c
+                    LEFT JOIN embeddings e ON e.criminal_id = c.id
+                    WHERE c.id = ?
+                """, (person_id,))
+                row = cursor.fetchone()
+                
+            if not row:
+                self.logger.person_search_trace("DB_PERSON_SEARCH_ROW", person_id=person_id, found=False)
+                return None
+                
+            info = dict(row)
+            raw_emb = info.pop("embedding", None)
+            
+            self.logger.person_search_trace(
+                "DB_PERSON_SEARCH_ROW", 
+                person_id=person_id, 
+                found=True, 
+                status=info.get("status"), 
+                has_raw_embedding=(raw_emb is not None),
+                raw_type=type(raw_emb).__name__
+            )
+            
+            emb = _coerce_embedding(raw_emb, logger=self.logger, person_id=person_id)
+            info["embedding"] = emb
+            
+            if emb is None:
+                self.logger.warning(f"[PERSON_SEARCH_TARGET_MISSING] person_id={person_id} reason='no_embedding_or_parse_error'")
+            else:
+                self.logger.info(f"[PERSON_SEARCH_TARGET_LOAD] person_id={person_id} has_embedding=true shape={emb.shape}")
+                
+            self.logger.person_search_trace("DB_PERSON_SEARCH_RESULT", person_id=person_id, has_embedding=(emb is not None))
+            return info
+            
+        except Exception as e:
+            self.logger.error(f"DB: get_person_embedding_for_search hatası - {e}")
+            return None
+
+    def find_duplicate_person(self, new_embedding: np.ndarray, threshold: float, uncertain_low: float) -> dict | None:
+        """
+        Yeni bir yüzün veritabanındakilerle mükerrer olup olmadığını kontrol eder.
+        
+        Args:
+            new_embedding: 512-d normalize numpy array
+            threshold: Bu değerin üzerindeki benzerlik "duplicate" (kesin) sayılır.
+            uncertain_low: Bu değer ile threshold arası "uncertain" (şüpheli) sayılır.
+            
+        Returns:
+            dict | None: Mükerrer/şüpheli kayıt varsa bilgileri döndürür. Yoksa None döner.
+        """
+        emb1 = _coerce_embedding(new_embedding, logger=self.logger, person_id="new")
+        if emb1 is None:
+            self.logger.error("[DUP_CHECK_ERROR] new_embedding is invalid")
+            return None
+
+        try:
+            with self._get_conn() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT c.id, c.name, c.crime_type, c.danger_level, c.status, e.embedding
+                    FROM criminals c
+                    JOIN embeddings e ON e.criminal_id = c.id
+                """)
+                rows = cursor.fetchall()
+
+            best_match = None
+            best_score = 0.0
+            
+            valid_count = 0
+            skipped_count = 0
+            
+            self.logger.info(f"[DUP_CHECK_START] db_rows={len(rows)} threshold={threshold:.2f} uncertain_low={uncertain_low:.2f}")
+
+            for row in rows:
+                rid = row["id"]
+                name = row["name"]
+                
+                db_emb = _coerce_embedding(row["embedding"], logger=self.logger, person_id=rid)
+                if db_emb is None:
+                    skipped_count += 1
+                    continue
+                    
+                valid_count += 1
+
+                # Cosine similarity (already normalized)
+                score = float(np.clip(np.dot(emb1, db_emb), -1.0, 1.0))
+                
+                # Her aday için log
+                self.logger.info(f"[DUP_CHECK_SCORE] candidate_id={rid} name='{name}' similarity={score:.3f} percent={score*100:.1f}")
+                
+                if score > best_score:
+                    best_score = score
+                    best_match = dict(row)
+            
+            if best_match is None:
+                self.logger.info(f"[DUP_CHECK_SUMMARY] valid={valid_count} skipped={skipped_count} best_id=none best_similarity=0.0 level='no_match'")
+                return None
+
+            percent = max(0.0, min(1.0, best_score)) * 100
+            
+            if best_score >= threshold:
+                level = "duplicate"
+            elif best_score >= uncertain_low:
+                level = "uncertain"
+            else:
+                level = "no_match"
+                
+            self.logger.info(f"[DUP_CHECK_SUMMARY] valid={valid_count} skipped={skipped_count} best_id={best_match['id']} best_similarity={best_score:.3f} level='{level}'")
+
+            if level == "no_match":
+                return None
+
+            return {
+                "person_id": best_match["id"],
+                "name": best_match["name"],
+                "crime_type": best_match["crime_type"],
+                "danger_level": best_match["danger_level"],
+                "status": best_match["status"],
+                "similarity": best_score,
+                "percent": percent,
+                "level": level
+            }
+
+        except Exception as e:
+            self.logger.error(f"DB: find_duplicate_person hatası - {e}")
+            return None
 
     # --- DETECTIONS (Tespit Kayıtları) ---
 
@@ -261,3 +486,28 @@ class Database:
                     WHERE id = ?
                 """, (status, request_id))
             conn.commit()
+
+    def list_persons_for_search(self) -> list[dict]:
+        """Kişi Ara (Person Search) modu için veritabanındaki kişileri listeler.
+        
+        Returns:
+            list[dict]: id, name, status, created_at, has_embedding
+        """
+        try:
+            with self._get_conn() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT 
+                        c.id, 
+                        c.name, 
+                        c.status, 
+                        c.created_at,
+                        CASE WHEN e.id IS NOT NULL THEN 1 ELSE 0 END as has_embedding
+                    FROM criminals c
+                    LEFT JOIN embeddings e ON c.id = e.criminal_id
+                    ORDER BY c.name ASC
+                """)
+                return [dict(row) for row in cursor.fetchall()]
+        except Exception as e:
+            self.logger.error(f"DB: list_persons_for_search hatası - {e}")
+            return []

@@ -32,86 +32,7 @@ _MODEL_PATH = PROJECT_ROOT / "best.pt"
 _EMBED_SIZE = 64
 _EMBED_DIM  = 512
 
-_yolo_model  = None
-_yolo_loaded = False
 
-
-def _get_yolo():
-    """YOLO modelini tek seferlik yükle."""
-    global _yolo_model, _yolo_loaded
-    if _yolo_loaded:
-        return _yolo_model
-    try:
-        from ultralytics import YOLO
-        _yolo_model  = YOLO(str(_MODEL_PATH))
-        _yolo_model.overrides['verbose'] = False
-        _yolo_loaded = True
-        return _yolo_model
-    except Exception as e:
-        print(f"[!] YOLO yüklenemedi: {e}")
-        return None
-
-
-def _make_embedding(crop_bgr: np.ndarray) -> np.ndarray:
-    """
-    Kırpılmış yüz görüntüsünden 512-d L2-normalize embedding üret.
-    CLAHE + DCT tabanlı, aydınlatmadan bağımsız.
-    """
-    gray    = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2GRAY)
-    resized = cv2.resize(gray, (_EMBED_SIZE, _EMBED_SIZE),
-                         interpolation=cv2.INTER_AREA)
-    clahe   = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(4, 4))
-    eq      = clahe.apply(resized).astype(np.float32) / 255.0
-    dct     = cv2.dct(eq)
-    flat    = dct.flatten()[:_EMBED_DIM]
-    if len(flat) < _EMBED_DIM:
-        flat = np.pad(flat, (0, _EMBED_DIM - len(flat)))
-    norm = np.linalg.norm(flat)
-    if norm > 1e-6:
-        flat = flat / norm
-    return flat.astype(np.float32)
-
-
-def _detect_and_embed(img_bgr: np.ndarray):
-    """
-    YOLO ile yüz algıla → en büyük tespiti kırp → embedding üret.
-    Returns: (embedding, error_str)
-    """
-    model = _get_yolo()
-    if model is None:
-        return None, "YOLO modeli yüklenemedi."
-
-    results = model(img_bgr, conf=0.25, verbose=False)
-    best_box  = None
-    best_area = 0
-
-    for r in results:
-        if r.boxes is None:
-            continue
-        for box in r.boxes:
-            x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
-            area = (x2 - x1) * (y2 - y1)
-            if area > best_area:
-                best_area = area
-                best_box  = (x1, y1, x2, y2)
-
-    if best_box is None:
-        # YOLO hiçbir şey tespit etmediyse tüm resmi kullan
-        # (portre fotoğrafi gibi durumlarda yüz zaten ortada)
-        crop = img_bgr
-    else:
-        x1, y1, x2, y2 = best_box
-        pad = 12
-        cx1 = max(0, x1 - pad)
-        cy1 = max(0, y1 - pad)
-        cx2 = min(img_bgr.shape[1], x2 + pad)
-        cy2 = min(img_bgr.shape[0], y2 + pad)
-        crop = img_bgr[cy1:cy2, cx1:cx2]
-        if crop.size == 0:
-            crop = img_bgr
-
-    emb = _make_embedding(crop)
-    return emb, ""
 
 
 def _read_image(path: str) -> np.ndarray | None:
@@ -128,63 +49,88 @@ def _read_image(path: str) -> np.ndarray | None:
         return None
 
 
-def _detect_faces_with_ids(img_bgr: np.ndarray):
+def _detect_faces_with_ids(img_bgr: np.ndarray, logger=None):
     """
     Fotoğraftaki tüm yüzleri tespit eder, soldan-sağa sıralayıp ID atar.
     Returns:
         faces: [{"face_id": int, "bbox": (x1,y1,x2,y2), "embedding": np.ndarray}]
         err: str
     """
-    model = _get_yolo()
-    if model is None:
-        return [], "YOLO modeli yüklenemedi."
+    try:
+        from utils.config import AppConfig
+        from core.face_analyzer import FaceAnalyzer
+        
+        cfg = AppConfig()
+        analyzer = FaceAnalyzer(cfg)
+        
+        dup_cfg = cfg.get("face", {}).get("duplicate_check", {})
+        min_conf = float(dup_cfg.get("min_face_confidence", 0.60))
+        
+        if logger:
+            logger.info("[FACE_DETECT_ADD] Starting face detection for new criminal.")
 
-    h, w = img_bgr.shape[:2]
-    results = model(img_bgr, conf=0.25, verbose=False)
-    boxes = []
-
-    for r in results:
-        if r.boxes is None:
-            continue
-        for box in r.boxes:
-            x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
-            x1 = max(0, min(x1, w - 1))
-            y1 = max(0, min(y1, h - 1))
-            x2 = max(0, min(x2, w))
-            y2 = max(0, min(y2, h))
-            if x2 <= x1 or y2 <= y1:
+        results = analyzer.detect_faces(img_bgr)
+        
+        if not results:
+            if logger: logger.warning("[FACE_DETECT_ADD] No faces found.")
+            return [], "Fotoğrafta yüz tespit edilemedi."
+            
+        faces = []
+        for r in results:
+            # bbox var mı?
+            if not r.bbox or len(r.bbox) != 4:
                 continue
-            boxes.append((x1, y1, x2, y2))
+            
+            # Confidence kontrolü
+            if r.det_score < min_conf:
+                if logger: logger.warning(f"[FACE_DETECT_ADD] Face rejected, low confidence: {r.det_score:.2f} < {min_conf}")
+                continue
+                
+            # Embedding var mı?
+            if r.embedding is None:
+                if logger: logger.warning("[FACE_DETECT_ADD] Face rejected, could not extract embedding.")
+                continue
+                
+            # Embedding doğrulaması (512-d, float32, normalized)
+            emb = np.asarray(r.embedding, dtype=np.float32).reshape(-1)
+            if emb.shape[0] != _EMBED_DIM:
+                if logger: logger.warning(f"[FACE_DETECT_ADD] Invalid embedding shape: {emb.shape}")
+                continue
+                
+            norm = np.linalg.norm(emb)
+            if norm < 1e-8:
+                if logger: logger.warning("[FACE_DETECT_ADD] Face rejected, zero embedding vector.")
+                continue
+                
+            emb = emb / norm
+            
+            if logger:
+                logger.info(f"[EMBEDDING_NEW] shape={emb.shape} norm={np.linalg.norm(emb):.3f} valid=true conf={r.det_score:.2f}")
 
-    if not boxes:
-        return [], "Fotoğrafta yüz tespit edilemedi."
-
-    # Soldan-sağa, sonra yukarıdan-aşağıya sıralama ile stabil ID ataması
-    boxes.sort(key=lambda b: (b[0], b[1]))
-
-    faces = []
-    for idx, (x1, y1, x2, y2) in enumerate(boxes, start=1):
-        pad = 12
-        cx1 = max(0, x1 - pad)
-        cy1 = max(0, y1 - pad)
-        cx2 = min(w, x2 + pad)
-        cy2 = min(h, y2 + pad)
-        crop = img_bgr[cy1:cy2, cx1:cx2]
-        if crop.size == 0:
-            crop = img_bgr[y1:y2, x1:x2]
-        if crop.size == 0:
-            continue
-
-        emb = _make_embedding(crop)
-        faces.append({
-            "face_id": idx,
-            "bbox": (x1, y1, x2, y2),
-            "embedding": emb
-        })
-
-    if not faces:
-        return [], "Yüz kırpma başarısız oldu."
-    return faces, ""
+            faces.append({
+                "bbox": tuple(map(int, r.bbox)),
+                "embedding": emb,
+                "det_score": r.det_score
+            })
+            
+        if not faces:
+            return [], "Yüz net algılanamadı. Daha net bir fotoğraf seçin."
+            
+        # Soldan-sağa sıralama
+        faces.sort(key=lambda f: f["bbox"][0])
+        
+        # ID atama
+        for idx, f in enumerate(faces, start=1):
+            f["face_id"] = idx
+            
+        if logger:
+            logger.info(f"[FACE_DETECT_ADD] Successfully extracted {len(faces)} faces.")
+            
+        return faces, ""
+        
+    except Exception as e:
+        if logger: logger.error(f"[FACE_DETECT_ADD] Error: {e}")
+        return [], f"Yüz analizi sırasında hata oluştu: {e}"
 
 
 class EmbedWorker(QThread):
@@ -196,14 +142,25 @@ class EmbedWorker(QThread):
         self.path = path
 
     def run(self):
+        from utils.logger import EventLogger
+        from utils.config import AppConfig
+        
+        cfg = AppConfig()
+        logger = EventLogger(cfg)
+        
         img = _read_image(self.path)
         if img is None:
             self.finished.emit(None, None, "Fotoğraf okunamadı.")
             return
-        faces, err = _detect_faces_with_ids(img)
+            
+        faces, err = _detect_faces_with_ids(img, logger)
         if err:
             self.finished.emit(None, None, err)
             return
+            
+        if len(faces) > 1:
+            logger.warning("[FACE_DETECT_ADD] Multiple faces detected.")
+            # İsteğe bağlı olarak burada uyarı döndürülebilir, ama şimdilik devam edip kullanıcıya seçtiriyoruz.
 
         preview = img.copy()
         for face in faces:
@@ -258,9 +215,32 @@ class SaveWorker(QThread):
 
     def run(self):
         try:
+            from utils.config import AppConfig
+            from utils.logger import EventLogger
             import sqlite3
             import shutil
             import datetime as dt
+            
+            cfg = AppConfig()
+            logger = EventLogger(cfg)
+            
+            # 1. Normalize and check embedding before saving
+            try:
+                emb = np.asarray(self.emb, dtype=np.float32).reshape(-1)
+                if emb.shape != (512,):
+                    raise ValueError(f"Invalid shape: {emb.shape}")
+                
+                norm = np.linalg.norm(emb)
+                if norm < 1e-8:
+                    raise ValueError("Zero norm embedding")
+                
+                emb = emb / norm
+                logger.info(f"[PERSON_SAVE_EMBEDDING] shape={emb.shape} norm={np.linalg.norm(emb):.3f} dtype={emb.dtype}")
+            except Exception as e:
+                logger.error(f"[PERSON_SAVE_ERROR] Failed to prepare embedding: {e}")
+                self.finished.emit(False, f"Yüz verisi geçersiz: {e}")
+                return
+
             db   = PROJECT_ROOT / "database" / "skywatch.db"
             pdir = PROJECT_ROOT / "database" / "photos"
             pdir.mkdir(parents=True, exist_ok=True)
@@ -269,7 +249,7 @@ class SaveWorker(QThread):
             dst  = pdir / f"{self.name.replace(' ', '_')}_{ts}{ext}"
             shutil.copy2(self.path, dst)
             buf  = io.BytesIO()
-            np.save(buf, self.emb)
+            np.save(buf, emb)
             blob = buf.getvalue()
             conn = sqlite3.connect(str(db), check_same_thread=False)
             c    = conn.cursor()
@@ -658,120 +638,107 @@ class AddCriminalPage(QWidget):
             return
         self._emb = selected["embedding"]
 
-    def _cosine_similarity(self, emb1: np.ndarray, emb2: np.ndarray) -> float:
-        n1 = np.linalg.norm(emb1)
-        n2 = np.linalg.norm(emb2)
-        if n1 < 1e-6 or n2 < 1e-6:
-            return 0.0
-        return float(np.clip(np.dot(emb1, emb2) / (n1 * n2), -1.0, 1.0))
-
-    def _duplicate_threshold(self) -> float:
-        try:
-            import yaml
-            with open(PROJECT_ROOT / "config" / "config.yaml", encoding="utf-8") as f:
-                cfg = yaml.safe_load(f) or {}
-            face_cfg = (cfg.get("face", {}) or {})
-            # Mükerrer kayıt kontrolü, canlı tanıma eşiğinden daha sıkı olmalı.
-            # duplicate_similarity_threshold varsa onu kullan; yoksa güvenli taban uygula.
-            base = float(face_cfg.get("duplicate_similarity_threshold", face_cfg.get("similarity_threshold", 0.45)))
-            return max(0.78, base)
-        except Exception:
-            return 0.78
-
-    def _find_existing_criminal(self, emb: np.ndarray):
-        import sqlite3
-        db = PROJECT_ROOT / "database" / "skywatch.db"
-        if not db.exists():
-            return None
-
-        threshold = self._duplicate_threshold()
-        best = None
-        best_score = threshold
-
-        conn = sqlite3.connect(str(db), check_same_thread=False)
-        c = conn.cursor()
-        c.execute("""
-            SELECT c.id, c.name, c.crime_type, c.danger_level, c.status, e.embedding
-            FROM criminals c
-            JOIN embeddings e ON e.criminal_id = c.id
-        """)
-        rows = c.fetchall()
-        conn.close()
-
-        for rid, name, crime_type, danger_level, status, emb_blob in rows:
-            try:
-                vec = np.load(io.BytesIO(emb_blob))
-            except Exception:
-                continue
-            score = self._cosine_similarity(emb, vec)
-            if score >= best_score:
-                best_score = score
-                best = {
-                    "id": int(rid),
-                    "name": name,
-                    "crime_type": crime_type,
-                    "danger_level": danger_level,
-                    "status": status,
-                    "score": score,
-                }
-        return best
-
     def _save(self):
+        from utils.config import AppConfig
+        from utils.logger import EventLogger
+        from database.db import Database
+        
+        cfg = AppConfig()
+        logger = EventLogger(cfg)
+        db = Database(cfg, logger)
+
         name = self._name.text().strip()
+        
+        if not name:
+            name = "Bilinmiyor"
+            self._name.setText(name)
+            
+        logger.info(f"[PERSON_ADD_START] name='{name}'")
+
         # Kaydetme anında embedding'i mutlaka seçili ID'den yeniden al
         selected = next((f for f in self._faces if f["face_id"] == self._selected_face_id), None)
         if selected is None:
             QMessageBox.warning(self, "Hata", "Önce fotoğraf ekleyin ve bir Yüz ID seçin.")
             return
+            
         current_emb = selected["embedding"]
         self._emb = current_emb
+        
         if self._selected_face_id in self._added_face_ids:
             QMessageBox.warning(self, "Uyarı", "Bu Yüz ID zaten eklendi. Kalan ID'lerden birini seçin.")
             return
-        if not name:
-            name = "Bilinmiyor"
-            self._name.setText(name)
 
         self._pending_face_id = self._selected_face_id
         self._pending_name = name
         dm = {"DÜŞÜK": "LOW", "ORTA": "MEDIUM", "YÜKSEK": "HIGH", "KRİTİK": "CRITICAL"}
         sm = {"ARANIYOR": "WANTED", "SABIKALI": "CRIMINAL", "TEMİZE ÇIKMIŞ": "CLEARED"}
 
-        existing = self._find_existing_criminal(current_emb)
-        update_id = None
-        if existing is not None:
-            # Aynı fotoğraf batch'inde farklı bir Yüz ID az önce eklendiyse,
-            # embedding benzerliği yüksek çıksa bile yanlış mükerrer olabilir.
-            batch_face = self._batch_criminal_to_face.get(existing["id"])
-            if (batch_face is not None
-                    and self._selected_face_id is not None
-                    and batch_face != self._selected_face_id
-                    and existing["score"] < 0.92):
-                existing = None
+        dup_cfg = cfg.get("face", {}).get("duplicate_check", {})
+        is_dup_enabled = bool(dup_cfg.get("enabled", True))
+        threshold = float(dup_cfg.get("cosine_threshold", 0.62))
+        uncertain_low = float(dup_cfg.get("uncertain_low", 0.52))
 
-        if existing is not None:
-            status_tr = {
-                "WANTED": "ARANIYOR",
-                "CRIMINAL": "SABIKALI",
-                "CLEARED": "TEMİZE ÇIKMIŞ",
-            }.get(existing["status"], existing["status"])
-            line = (
-                f"ID {existing['id']} zaten kayıtlı: {existing['name']} | "
-                f"Suç: {existing['crime_type']} | Tehlike: {existing['danger_level']} | "
-                f"Durum: {status_tr} | Benzerlik: %{existing['score'] * 100:.1f}. "
-                "Son ayarlarla güncellemek ister misiniz?"
-            )
-            ans = QMessageBox.question(
-                self,
-                "Mükerrer Kayıt Uyarısı",
-                line,
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No
-            )
-            if ans == QMessageBox.StandardButton.Yes:
-                update_id = existing["id"]
-            else:
-                return
+        update_id = None
+        
+        if is_dup_enabled:
+            logger.info(f"[DUP_CHECK_START] threshold={threshold} uncertain_low={uncertain_low}")
+            existing = db.find_duplicate_person(current_emb, threshold, uncertain_low)
+            
+            if existing is not None:
+                # Aynı fotoğraf batch'inde farklı bir Yüz ID az önce eklendiyse
+                batch_face = self._batch_criminal_to_face.get(existing["person_id"])
+                if (batch_face is not None
+                        and self._selected_face_id is not None
+                        and batch_face != self._selected_face_id
+                        and existing["similarity"] < 0.92):
+                    existing = None
+                    
+            if existing is not None:
+                logger.info(f"[DUP_CHECK_SCORE] candidate_id={existing['person_id']} name='{existing['name']}' similarity={existing['similarity']:.2f} percent={existing['percent']:.1f}")
+
+                status_tr = {
+                    "WANTED": "ARANIYOR",
+                    "CRIMINAL": "SABIKALI",
+                    "CLEARED": "TEMİZE ÇIKMIŞ",
+                }.get(existing["status"], existing["status"])
+                
+                if existing["level"] == "duplicate":
+                    title = "Kesin Mükerrer Kayıt Uyarısı"
+                    line = (
+                        f"ID {existing['person_id']} zaten kayıtlı: {existing['name']} | "
+                        f"Suç: {existing['crime_type']} | Tehlike: {existing['danger_level']} | "
+                        f"Durum: {status_tr}\n\n"
+                        f"Benzerlik: %{existing['percent']:.1f}\n\n"
+                        "Bu kişinin zaten sistemde olduğu tespit edildi.\n"
+                        "Mevcut kişiyi güncelleyelim mi yoksa yine de yeni kayıt olarak mı eklensin?"
+                    )
+                else:
+                    title = "Şüpheli Mükerrer Kayıt"
+                    line = (
+                        f"Bu kişi ID {existing['person_id']} ({existing['name']}) ile orta seviyede benziyor.\n"
+                        f"Benzerlik: %{existing['percent']:.1f}\n\n"
+                        "Mevcut kişiyi güncelleyelim mi yoksa yine de yeni kayıt olarak mı eklensin?"
+                    )
+
+                msg_box = QMessageBox(self)
+                msg_box.setWindowTitle(title)
+                msg_box.setText(line)
+                
+                btn_update = msg_box.addButton("Mevcut Kişiyi Güncelle", QMessageBox.ButtonRole.AcceptRole)
+                btn_new = msg_box.addButton("Yeni Kişi Olarak Ekle", QMessageBox.ButtonRole.DestructiveRole)
+                btn_cancel = msg_box.addButton("İptal", QMessageBox.ButtonRole.RejectRole)
+                
+                msg_box.exec()
+                
+                clicked_btn = msg_box.clickedButton()
+                
+                if clicked_btn == btn_update:
+                    update_id = existing["person_id"]
+                elif clicked_btn == btn_new:
+                    update_id = None
+                else:
+                    logger.info("[PERSON_ADD_CANCELLED] reason='user_cancelled_duplicate_dialog'")
+                    return
 
         self._btn.setEnabled(False)
         self._btn.setText("Kaydediliyor...")
@@ -787,13 +754,22 @@ class AddCriminalPage(QWidget):
         self._sworker = w
 
     def _on_save(self, ok: bool, msg: str):
+        from utils.config import AppConfig
+        from utils.logger import EventLogger
+        
+        cfg = AppConfig()
+        logger = EventLogger(cfg)
+        
         self._btn.setText("Seçili Yüzü Veritabanına Ekle")
         if ok:
             if self._pending_face_id is not None:
                 self._added_face_ids.add(self._pending_face_id)
             m = re.search(r"ID:\s*(\d+)", msg)
             if m and self._pending_face_id is not None:
-                self._batch_criminal_to_face[int(m.group(1))] = int(self._pending_face_id)
+                pid = int(m.group(1))
+                self._batch_criminal_to_face[pid] = int(self._pending_face_id)
+                logger.info(f"[PERSON_ADD_SUCCESS] person_id={pid}")
+                
             QMessageBox.information(self, "Başarılı", msg)
             self.person_added.emit(self._pending_name)
             if len(self._added_face_ids) >= len(self._faces):

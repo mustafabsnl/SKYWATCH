@@ -37,6 +37,27 @@ from utils.config import AppConfig
 from utils.logger import EventLogger, EventType
 
 
+def _normalize_person_search_target_ids(options: dict) -> list[int]:
+    raw = options.get("target_person_ids")
+    ordered: list[int] = []
+    seen: set[int] = set()
+    if isinstance(raw, (list, tuple)):
+        for x in raw:
+            try:
+                pid = int(x)
+            except (TypeError, ValueError):
+                continue
+            if pid not in seen:
+                seen.add(pid)
+                ordered.append(pid)
+    if not ordered and options.get("target_person_id") is not None:
+        try:
+            ordered.append(int(options["target_person_id"]))
+        except (TypeError, ValueError):
+            pass
+    return ordered
+
+
 class Pipeline:
     """Tüm modülleri birleştiren ana işlem hattı."""
 
@@ -68,7 +89,7 @@ class Pipeline:
         self.movement      = MovementAnalyzer(config.movement)
         self.gmc           = GMCModule(config.tracking)   # Sabit kamera → varsayılan kapalı
         self.db            = Database(config, logger)
-        self.decision      = DecisionEngine()
+        self.decision      = DecisionEngine(logger=self.logger)
         self.track_registry = TrackRegistry()
         self._active_camera_ids = [c.get("id", "") for c in config.get_active_cameras() if c.get("id")]
         if self._active_camera_ids:
@@ -82,7 +103,10 @@ class Pipeline:
 
         # Screenshot ayarları
         self._save_screenshots = config.logging.get("save_detection_screenshots", True)
-        self._screenshot_dir   = config.get_screenshot_dir()
+        if hasattr(self.logger, "_run_logger") and self.logger._run_logger and hasattr(self.logger._run_logger, "resolve_run_path"):
+            self._screenshot_dir = self.logger._run_logger.resolve_run_path("detections")
+        else:
+            self._screenshot_dir = config.get_screenshot_dir()
 
         # Frame Skip
         self._detect_every_n                  = 4          # Her 4 frame'de 1 algılama
@@ -110,7 +134,8 @@ class Pipeline:
 
         # ═══ Vote-Based Criminal Matching (3 ardışık oy gerekli) ═══
         # (cam_id, track_id) → {criminal_id: {count, best_conf, last_frame}}
-        self._match_votes: dict[tuple[str, int], dict[int, int]] = {}
+        self._match_votes: dict[tuple[str, int], dict[int, dict]] = {}
+        self._vote_threshold_baseline = 3
         self._vote_threshold = 3
 
         # ═══ DB Kontrol Aralığı (CPU koruma) ═══
@@ -155,6 +180,167 @@ class Pipeline:
         self._overlay_suppress_raw_if_track_exists = bool(self._overlay_cfg.get("suppress_raw_if_track_exists", True))
         self._overlay_suppress_predicted_if_real_detection_exists = bool(self._overlay_cfg.get("suppress_predicted_if_real_detection_exists", True))
         self._overlay_draw_orphan_raw_faces = bool(self._overlay_cfg.get("draw_orphan_raw_faces", True))
+        self._overlay_draw_orphan_fallback_only = bool(self._overlay_cfg.get("draw_orphan_fallback_only", True))
+        self._overlay_fallback_min_hits_to_draw = int(self._overlay_cfg.get("fallback_min_hits_to_draw", 2) or 0)
+        self._overlay_near_duplicate_enabled = bool(self._overlay_cfg.get("near_duplicate_enabled", True))
+        self._overlay_near_duplicate_center_factor = float(self._overlay_cfg.get("near_duplicate_center_factor", 0.85) or 0.85)
+        self._overlay_near_duplicate_min_center_px = float(self._overlay_cfg.get("near_duplicate_min_center_px", 35.0) or 35.0)
+        self._overlay_near_duplicate_size_ratio_min = float(self._overlay_cfg.get("near_duplicate_size_ratio_min", 0.50) or 0.50)
+        self._overlay_near_duplicate_size_ratio_max = float(self._overlay_cfg.get("near_duplicate_size_ratio_max", 2.00) or 2.00)
+        self._overlay_near_duplicate_vertical_factor = float(self._overlay_cfg.get("near_duplicate_vertical_factor", 0.90) or 0.90)
+        self._overlay_fallback_suppress_center_factor = float(self._overlay_cfg.get("fallback_suppress_center_factor", 0.90) or 0.90)
+        self._overlay_fallback_suppress_min_center_px = float(self._overlay_cfg.get("fallback_suppress_min_center_px", 40.0) or 40.0)
+        self._overlay_fallback_suppress_iou = float(self._overlay_cfg.get("fallback_suppress_iou", 0.20) or 0.20)
+        self._overlay_fallback_suppress_iou = float(self._overlay_cfg.get("fallback_suppress_iou", 0.20) or 0.20)
+        self._fallback_hits: dict[tuple[str, int], int] = {}
+        
+        self.current_mode = "GENERAL"
+        self.target_person_id = None
+        self.target_person_ids: list[int] = []
+        self.target_embedding = None
+        self._person_search_embeddings: dict[int, np.ndarray] = {}
+
+    def set_mode(self, mode: str, options: dict = None):
+        """Çalışma modunu ve (varsa) hedef kişi bilgisini ayarlar."""
+        options = dict(options or {})
+        self.logger.person_search_trace("PIPELINE_MODE_SET_BEGIN", requested_mode=mode, options=str(options))
+        
+        mode = str(mode or "GENERAL").upper()
+        # Legacy mode normalization
+        if mode in ["DATABASE", "WANTED_TRACKING"]:
+            mode = "GENERAL"
+        if mode not in ("GENERAL", "PERSON_SEARCH"):
+            self.logger.warning(f"[PIPELINE_MODE_SET] unsupported mode={mode}; falling back to GENERAL")
+            mode = "GENERAL"
+            
+        if mode == "PERSON_SEARCH":
+            next_targets = _normalize_person_search_target_ids(options)
+            next_signature = tuple(next_targets)
+        else:
+            next_targets = []
+            next_signature = tuple()
+
+        prev_signature = tuple(self.target_person_ids) if getattr(self, "target_person_ids", None) else tuple()
+        if not prev_signature and self.target_person_id is not None:
+            prev_signature = (int(self.target_person_id),)
+
+        mode_changed = mode != self.current_mode or next_signature != prev_signature
+        self.current_mode = mode
+        self.target_person_ids = []
+        self.target_person_id = None
+        self.target_embedding = None
+        self._person_search_embeddings.clear()
+
+        if mode_changed:
+            self._match_votes.clear()
+            self._last_db_check_frame.clear()
+            if hasattr(self.tracker, "_criminal_matches"):
+                self.tracker._criminal_matches.clear()
+            
+        self.logger.person_search_trace(
+            "PIPELINE_MODE_NORMALIZED",
+            current_mode=self.current_mode,
+            target_person_id=self.target_person_id,
+            target_person_ids=list(self.target_person_ids),
+        )
+
+        if mode == "PERSON_SEARCH" and len(next_targets) == 0:
+            self.current_mode = "GENERAL"
+            self.decision.set_mode("GENERAL", {})
+            self.logger.warning("[PIPELINE_MODE_SET_FAILED] PERSON_SEARCH missing target person id(s)")
+            self.logger.person_search_trace("PERSON_SEARCH_TARGET_LOAD_FAILED", reason="missing_target_person_ids")
+            return False
+
+        if mode == "PERSON_SEARCH":
+            self.logger.info(f"[PIPELINE_MODE_SET] mode=PERSON_SEARCH target_person_ids={next_targets}")
+            self.logger.person_search_trace(
+                "PERSON_SEARCH_TARGETS_LOAD_BEGIN", person_ids=list(next_targets)
+            )
+
+            for pid in next_targets:
+                info = self.db.get_person_embedding_for_search(pid)
+                if info is None or info.get("embedding") is None:
+                    self.logger.warning(f"[PERSON_SEARCH_TARGET_SKIP_NO_EMBEDDING] person_id={pid}")
+                    self.logger.person_search_trace(
+                        "PERSON_SEARCH_TARGET_LOAD_FAILED",
+                        person_id=pid,
+                        reason="embedding_missing",
+                    )
+                    continue
+                emb = info["embedding"]
+                self._person_search_embeddings[pid] = emb
+                self.target_person_ids.append(int(pid))
+                self.logger.info(
+                    f"[PERSON_SEARCH_TARGET_CACHE] person_id={pid} name=\"{info['name']}\" "
+                    f"emb_shape={tuple(emb.shape)} norm={np.linalg.norm(emb):.3f}"
+                )
+                self.logger.person_search_trace(
+                    "PERSON_SEARCH_TARGET_LOAD_OK",
+                    person_id=pid,
+                    name=info["name"],
+                    status=info["status"],
+                    emb_shape=str(emb.shape),
+                    emb_dtype=str(emb.dtype),
+                    norm=float(np.linalg.norm(emb)),
+                )
+
+            if not self._person_search_embeddings:
+                self.current_mode = "GENERAL"
+                self.target_person_ids = []
+                self.target_person_id = None
+                self.decision.set_mode("GENERAL", {})
+                self.logger.warning("[PIPELINE_MODE_SET_FAILED] PERSON_SEARCH no embeddings loaded for targets")
+                self.logger.person_search_trace(
+                    "PERSON_SEARCH_TARGET_LOAD_FAILED", reason="no_embeddings_for_any_target"
+                )
+                return False
+
+            self.target_person_id = self.target_person_ids[0]
+            self.target_embedding = (
+                self._person_search_embeddings.get(self.target_person_id)
+                if len(self.target_person_ids) == 1
+                else None
+            )
+
+            dedup_opts = dict(options)
+            dedup_opts["target_person_ids"] = list(self.target_person_ids)
+            dedup_opts["target_person_id"] = self.target_person_id
+            self.decision.set_mode(mode, dedup_opts)
+            self.logger.person_search_trace(
+                "PIPELINE_DECISION_MODE_SET",
+                mode=mode,
+                target_person_id=self.target_person_id,
+                target_person_ids=list(self.target_person_ids),
+            )
+
+        elif mode == "GENERAL":
+            self.logger.info("[PIPELINE_MODE_SET] mode=GENERAL")
+            self.logger.person_search_trace("PIPELINE_MODE_SET_GENERAL", status="OK")
+            self.target_embedding = None
+            self.target_person_ids = []
+            self._person_search_embeddings.clear()
+            self._refresh_cache()
+            self.decision.set_mode(mode, options)
+            self.logger.person_search_trace("PIPELINE_DECISION_MODE_SET", mode=mode, target_person_id=None)
+
+        if self.current_mode == "PERSON_SEARCH":
+            self._vote_threshold = 1
+        else:
+            self._vote_threshold = self._vote_threshold_baseline
+
+        emb_ready = len(self._person_search_embeddings) > 0 if self.current_mode == "PERSON_SEARCH" else False
+        self.logger.person_search_trace(
+            "PERSON_SEARCH_TARGET_CACHE_STATE",
+            has_target_embedding=emb_ready,
+            target_person_ids=list(self.target_person_ids),
+            target_person_id=self.target_person_id,
+        )
+        self.logger.info(
+            f"[PIPELINE_MODE_STATE] current_mode={self.current_mode} target_person_ids={self.target_person_ids} "
+            f"has_targets_embedded={str(emb_ready).lower()}"
+        )
+        self.logger.info(f"[PIPELINE_MODE_SET_DONE] mode={self.current_mode} current_mode={self.current_mode}")
+        return True
 
     def _bbox_iou(self, a: list[int], b: list[int]) -> float:
         ax1, ay1, ax2, ay2 = a
@@ -192,77 +378,100 @@ class Pipeline:
         return inter / float(inner_area)
 
     def _is_real_status(self, status: str) -> bool:
+        if self._status_norm(status) == "HEDEF BULUNDU":
+            return True
         s = str(status or "").upper()
-        return s in ("WANTED", "CRIMINAL", "ARANIYOR", "CLEAN", "TEMIZ", "TEMİZ", "UNKNOWN", "TRACKING", "TENTATIVE", "FACE")
+        return s in ("WANTED", "CRIMINAL", "ARANIYOR", "CLEAN", "TEMIZ", "TEMİZ", "UNKNOWN", "TRACKING", "TENTATIVE")
 
-    def _is_overlay_close(self, a: list[int], b: list[int]) -> bool:
-        if self._bbox_iou(a, b) > 0.25:
-            return True
-        if self._bbox_center_distance(a, b) < 80.0:
-            return True
-        cont_ab = self._bbox_containment_ratio(a, b)
-        cont_ba = self._bbox_containment_ratio(b, a)
-        return max(cont_ab, cont_ba) > 0.60
-
-    # ──────────────────────────────────────────────────────────────────────
-    # Status-priority NMS / dedup — final decisions çizilmeden önce uygulanır.
-    # Aynı kişi için birden çok kutu varsa en yüksek öncelikli olanı bırakır.
-    # ──────────────────────────────────────────────────────────────────────
     _STATUS_PRIORITY: dict[str, int] = {
         "WANTED": 100,
         "CRIMINAL": 100,
         "ARANIYOR": 100,
-        "CLEAN": 80,
-        "TEMIZ": 80,
-        "TEMİZ": 80,
-        "UNKNOWN": 60,
-        "TRACKING": 40,
-        "TENTATIVE": 40,
-        "FACE": 30,
-        "RAW_FALLBACK": 20,
+        "HEDEF BULUNDU": 110,
+        "TARGET_FOUND": 110,
+        "CLEAN": 90,
+        "TEMIZ": 90,
+        "TEMİZ": 90,
+        "UNKNOWN": 80,
+        "TRACKING": 70,
+        "TENTATIVE": 60,
+        "FACE": 50,
+        "RAW_FALLBACK": 30,
         "PREDICTED": 10,
     }
 
+    def _status_norm(self, value: str) -> str:
+        s = str(value or "").upper()
+        if s == "TARGET_FOUND":
+            return "HEDEF BULUNDU"
+        if s == "TEMİZ":
+            return "TEMIZ"
+        return s
+
+    def _is_low_priority_overlay(self, dec) -> bool:
+        status = self._status_norm(getattr(dec, "status", ""))
+        source = str(getattr(dec, "_overlay_source", "") or getattr(dec, "_track_source", "")).upper()
+        return status in ("RAW_FALLBACK", "FACE", "TENTATIVE", "TRACKING", "PREDICTED") or source in ("RAW_FALLBACK", "PREDICTED")
+
+    def _is_real_decision(self, dec) -> bool:
+        status = self._status_norm(getattr(dec, "status", ""))
+        if status == "HEDEF BULUNDU":
+            return True
+        return status in ("WANTED", "CRIMINAL", "ARANIYOR", "CLEAN", "TEMIZ", "UNKNOWN", "TRACKING", "TENTATIVE")
+
+    def _bbox_area(self, bbox: list[int]) -> float:
+        return float(max(1, bbox[2] - bbox[0]) * max(1, bbox[3] - bbox[1]))
+
     def _decision_priority(self, dec) -> tuple[int, float, int]:
-        status = str(getattr(dec, "status", "")).upper()
+        status = self._status_norm(getattr(dec, "status", ""))
         prio = self._STATUS_PRIORITY.get(status, 0)
         conf = float(getattr(dec, "confidence", 0.0) or 0.0)
-        # Daha eski (büyük) track_id daha stabil sayılır → tie-breaker
-        tid = int(getattr(dec, "track_id", 0) or 0)
-        return (prio, conf, tid)
+        updated = int(getattr(dec, "_updated_at", 0) or 0)
+        area = self._bbox_area(getattr(dec, "bbox", [0, 0, 1, 1]))
+        return (prio, conf, updated, int(area))
 
-    def _is_duplicate_candidate(self, a, b) -> tuple[bool, str]:
+    def _is_same_face_candidate(self, a, b) -> tuple[bool, str]:
         abox = getattr(a, "bbox", None)
         bbox = getattr(b, "bbox", None)
         if not abox or not bbox or len(abox) != 4 or len(bbox) != 4:
             return False, ""
-
-        # A) Aynı track/global kimlik
-        if getattr(a, "track_id", None) is not None and getattr(a, "track_id", None) == getattr(b, "track_id", None):
-            if getattr(a, "track_id", None) not in (None, 0):
+        same_camera = str(getattr(a, "_camera_id", "")) == str(getattr(b, "_camera_id", ""))
+        if same_camera:
+            ta = getattr(a, "track_id", None)
+            tb = getattr(b, "track_id", None)
+            if ta is not None and tb is not None and ta == tb and ta not in (0, None):
                 return True, "same_track"
         if getattr(a, "global_id", None) and getattr(a, "global_id", None) == getattr(b, "global_id", None):
             return True, "same_track"
 
+        aw = float(max(1, abox[2] - abox[0]))
+        ah = float(max(1, abox[3] - abox[1]))
+        bw = float(max(1, bbox[2] - bbox[0]))
+        bh = float(max(1, bbox[3] - bbox[1]))
+        avg_box_size = (aw + ah + bw + bh) / 4.0
+        avg_height = (ah + bh) / 2.0
+        acx = (abox[0] + abox[2]) / 2.0
+        acy = (abox[1] + abox[3]) / 2.0
+        bcx = (bbox[0] + bbox[2]) / 2.0
+        bcy = (bbox[1] + bbox[3]) / 2.0
+        center_distance = self._bbox_center_distance(abox, bbox)
+        vertical_distance = abs(acy - bcy)
+        size_ratio = self._bbox_area(abox) / max(1.0, self._bbox_area(bbox))
         iou = self._bbox_iou(abox, bbox)
-        center_d = self._bbox_center_distance(abox, bbox)
-        min_dim = float(min(max(1, abox[2] - abox[0]), max(1, abox[3] - abox[1]), max(1, bbox[2] - bbox[0]), max(1, bbox[3] - bbox[1])))
 
-        # B) Raw vs track/decision zinciri
-        asrc = str(getattr(a, "_overlay_source", "")).lower()
-        bsrc = str(getattr(b, "_overlay_source", "")).lower()
-        if {"raw_fallback", "decision"} == {asrc, bsrc} and iou >= 0.5:
-            return True, "raw"
+        a_low = self._is_low_priority_overlay(a)
+        b_low = self._is_low_priority_overlay(b)
+        if a_low != b_low:
+            center_thr = max(self._overlay_near_duplicate_min_center_px, self._overlay_near_duplicate_center_factor * avg_box_size)
+            if (
+                center_distance < center_thr
+                and self._overlay_near_duplicate_size_ratio_min <= size_ratio <= self._overlay_near_duplicate_size_ratio_max
+                and vertical_distance < (self._overlay_near_duplicate_vertical_factor * avg_height)
+            ):
+                return True, "near_duplicate_low_priority"
 
-        # C) Yüksek overlap + yakın merkez
-        if iou > 0.55 and center_d < (min_dim * 0.45):
-            return True, "iou_center"
-
-        # D) Büyük oranda containment + merkez yakın
-        cont_ab = self._bbox_containment_ratio(abox, bbox)
-        cont_ba = self._bbox_containment_ratio(bbox, abox)
-        if max(cont_ab, cont_ba) > 0.75 and center_d < (min_dim * 0.6):
-            return True, "containment"
+        if self._is_real_decision(a) and self._is_real_decision(b) and iou > 0.70:
+            return True, "real_overlap"
 
         return False, ""
 
@@ -303,26 +512,142 @@ class Pipeline:
             "duplicate_removed_predicted": 0,
             "duplicate_removed_same_track": 0,
         }
+        
+        is_ps = (self.current_mode == "PERSON_SEARCH")
+        cfg_debug = self.config.get("debug", {}) if hasattr(self.config, "get") else {}
+        do_ps_trace = is_ps and bool(cfg_debug.get("person_search_log_renderer_filter", True))
+        
+        if do_ps_trace:
+            self.logger.person_search_trace("PS_DEDUP_BEFORE", count=len(decisions), statuses=str([d.status for d in decisions]))
+            
         for d in ordered:
             bbox = getattr(d, "bbox", None)
             if not bbox or len(bbox) != 4:
                 continue
             duplicate = False
             for k in kept:
-                is_dup, reason = self._is_duplicate_candidate(d, k)
+                is_dup, reason = self._is_same_face_candidate(d, k)
                 if is_dup:
                     duplicate = True
                     stats["duplicate_removed_count"] += 1
                     if reason == "same_track":
                         stats["duplicate_removed_same_track"] += 1
-                    if str(getattr(d, "_overlay_source", "")).lower() == "raw_fallback":
+                    if self._status_norm(getattr(d, "status", "")) == "RAW_FALLBACK" or str(getattr(d, "_track_source", "")).lower() == "raw_fallback":
                         stats["duplicate_removed_raw"] += 1
-                    if str(getattr(d, "status", "")).upper() == "PREDICTED":
+                    if self._status_norm(getattr(d, "status", "")) == "PREDICTED":
                         stats["duplicate_removed_predicted"] += 1
+                    if do_ps_trace:
+                        self.logger.person_search_trace("PS_DEDUP_DROP", dropped_status=d.status, kept_status=k.status, reason=reason, dropped_track=d.track_id, kept_track=k.track_id)
                     break
             if not duplicate:
                 kept.append(d)
+                
+        if do_ps_trace:
+            self.logger.person_search_trace("PS_DEDUP_AFTER", count=len(kept), statuses=str([k.status for k in kept]))
+            
         return kept, stats
+
+    def _is_fallback_or_predicted(self, dec) -> tuple[bool, str]:
+        status = self._status_norm(getattr(dec, "status", ""))
+        source = str(getattr(dec, "_track_source", "")).lower()
+        if status == "PREDICTED" or source == "predicted":
+            return True, "predicted"
+        if status in ("RAW_FALLBACK", "FACE") or source == "raw_fallback":
+            return True, "raw_fallback"
+        return False, ""
+
+    def _is_near_real_for_fallback(self, candidate, real_decision) -> bool:
+        cb = getattr(candidate, "bbox", None)
+        rb = getattr(real_decision, "bbox", None)
+        if not cb or not rb:
+            return False
+        cw = float(max(1, cb[2] - cb[0]))
+        ch = float(max(1, cb[3] - cb[1]))
+        rw = float(max(1, rb[2] - rb[0]))
+        rh = float(max(1, rb[3] - rb[1]))
+        avg_box = (cw + ch + rw + rh) / 4.0
+        center_thr = max(self._overlay_fallback_suppress_min_center_px, self._overlay_fallback_suppress_center_factor * avg_box)
+        return (
+            self._bbox_center_distance(cb, rb) < center_thr
+            or self._bbox_iou(cb, rb) > self._overlay_fallback_suppress_iou
+        )
+
+    def _suppress_near_duplicate_overlay(self, decisions: list) -> tuple[list, dict]:
+        stats = {
+            "near_duplicate_removed": 0,
+            "fallback_suppressed_near_real": 0,
+            "predicted_suppressed_near_real": 0,
+            "orphan_fallback_drawn": 0,
+            "fallback_hidden_min_hits": 0,
+            "same_track_duplicates_removed": 0,
+        }
+        if not decisions or not self._overlay_near_duplicate_enabled:
+            return decisions, stats
+
+        ordered = sorted(decisions, key=self._decision_priority, reverse=True)
+        kept: list = []
+        
+        is_ps = (self.current_mode == "PERSON_SEARCH")
+        cfg_debug = self.config.get("debug", {}) if hasattr(self.config, "get") else {}
+        do_ps_trace = is_ps and bool(cfg_debug.get("person_search_log_renderer_filter", True))
+        
+        for dec in ordered:
+            duplicate = False
+            for existing in kept:
+                is_same, reason = self._is_same_face_candidate(dec, existing)
+                if is_same:
+                    duplicate = True
+                    stats["near_duplicate_removed"] += 1
+                    if reason == "same_track":
+                        stats["same_track_duplicates_removed"] += 1
+                    if do_ps_trace:
+                        self.logger.person_search_trace("PS_NEAR_SUPPRESS_DROP", dropped_status=dec.status, kept_status=existing.status, reason=reason)
+                    break
+            if not duplicate:
+                kept.append(dec)
+
+        real_decisions = [d for d in kept if self._is_real_decision(d)]
+        final: list = []
+        for dec in kept:
+            is_fallback, fallback_kind = self._is_fallback_or_predicted(dec)
+            if not is_fallback:
+                final.append(dec)
+                continue
+
+            near_real = any(self._is_near_real_for_fallback(dec, rd) for rd in real_decisions)
+            if near_real:
+                if fallback_kind == "predicted":
+                    stats["predicted_suppressed_near_real"] += 1
+                else:
+                    stats["fallback_suppressed_near_real"] += 1
+                continue
+
+            if fallback_kind == "predicted":
+                continue
+
+            track_id = int(getattr(dec, "track_id", 0) or 0)
+            camera_id = str(getattr(dec, "_camera_id", ""))
+            key = (camera_id, track_id)
+            self._fallback_hits[key] = self._fallback_hits.get(key, 0) + 1
+            is_wanted = self._status_norm(getattr(dec, "status", "")) in ("WANTED", "CRIMINAL", "ARANIYOR")
+            if (not is_wanted) and self._overlay_fallback_min_hits_to_draw > 1 and self._fallback_hits[key] < self._overlay_fallback_min_hits_to_draw:
+                stats["fallback_hidden_min_hits"] += 1
+                continue
+            if self._overlay_draw_orphan_fallback_only and near_real:
+                stats["fallback_suppressed_near_real"] += 1
+                continue
+            stats["orphan_fallback_drawn"] += 1
+            final.append(dec)
+
+        live_fallback_keys = {
+            (str(getattr(d, "_camera_id", "")), int(getattr(d, "track_id", 0) or 0))
+            for d in kept
+            if self._is_fallback_or_predicted(d)[0]
+        }
+        for key in list(self._fallback_hits.keys()):
+            if key not in live_fallback_keys:
+                del self._fallback_hits[key]
+        return final, stats
 
     # ──────────────────────────────────────────────────────────────────────
     def _refresh_cache(self):
@@ -406,6 +731,44 @@ class Pipeline:
             faces = self._last_faces.get(camera_id, [])
             frame_counter_val = self._frame_counter[camera_id]
         face_detection_ms = (time.perf_counter() - t_detect) * 1000.0
+        
+        cfg_debug = self.config.get("debug", {}) if hasattr(self.config, "get") else {}
+        is_ps = (self.current_mode == "PERSON_SEARCH")
+        log_every = int(cfg_debug.get("person_search_log_every_n_frames", 10))
+        do_ps_trace = is_ps and (self._frame_total % log_every == 0)
+
+        if do_ps_trace:
+            self.logger.person_search_trace(
+                "PS_FRAME_BEGIN", 
+                frame_total=self._frame_total, 
+                camera_id=camera_id, 
+                mode=self.current_mode, 
+                target_person_ids=list(self.target_person_ids),
+                target_id=self.target_person_id,
+                has_target_embedding=(len(self._person_search_embeddings) > 0),
+            )
+            self.logger.person_search_trace(
+                "PS_FACE_DETECT", 
+                camera_id=camera_id, 
+                ran=face_detection_ran, 
+                faces=len(faces), 
+                used_cached_faces=used_cached_faces, 
+                detect_every_n=self._detect_every_n
+            )
+            for idx, face in enumerate(faces):
+                has_emb = face.embedding is not None
+                emb_shape = str(face.embedding.shape) if has_emb else "None"
+                emb_norm = f"{np.linalg.norm(face.embedding):.3f}" if has_emb else "0.000"
+                self.logger.person_search_trace(
+                    "PS_FACE_ITEM", 
+                    camera_id=camera_id, 
+                    face_idx=idx, 
+                    bbox=str(face.bbox), 
+                    det_score=f"{face.det_score:.2f}", 
+                    has_embedding=has_emb, 
+                    emb_shape=emb_shape, 
+                    emb_norm=emb_norm
+                )
 
         # ═══ AŞAMA 2: GMC — Kamera Kayma Tahmini ═══
         # Sabit kamera + gmc_enabled=False → gmc_delta = (0, 0) → hiç etkisi yok
@@ -419,9 +782,29 @@ class Pipeline:
         tracker_ms = (time.perf_counter() - t_tracker) * 1000.0
         tracker_debug = dict(self.tracker.last_debug.get(camera_id, {}))
 
-        # Hayalet kutu önlemi: time_since_update > 3 → yüzü zaten görmüyoruz
-        tracks = [t for t in all_tracks if t.time_since_update <= 3]
+        # Production overlay: yalnızca bu frame'de update alan track'ler çizilsin.
+        # DeepSORT iç state korunur; burada sadece output/overlay akışı filtrelenir.
+        allow_stale = bool(getattr(self.tracker, "render_stale_deepsort_tracks", True))
+        max_tsu = int(getattr(self.tracker, "max_render_time_since_update", 0) or 0)
+        if not allow_stale:
+            tracks = [t for t in all_tracks if int(getattr(t, "time_since_update", 0) or 0) <= max_tsu]
+        else:
+            # Hayalet kutu önlemi: time_since_update > 3 → yüzü zaten görmüyoruz
+            tracks = [t for t in all_tracks if int(getattr(t, "time_since_update", 0) or 0) <= 3]
         self.stats["active_tracks"] = len(tracks)
+        
+        if do_ps_trace:
+            self.logger.person_search_trace(
+                "PS_TRACKER_OUTPUT", 
+                camera_id=camera_id, 
+                raw_tracks=tracker_debug.get("tracker_raw_tracks", 0),
+                rendered_tracks=len(tracks),
+                confirmed=tracker_debug.get("tracker_confirmed_tracks", 0),
+                tentative=tracker_debug.get("tracker_tentative_tracks", 0),
+                fallback=tracker_debug.get("tracker_fallback_tracks", 0),
+                rejected_no_embedding=tracker_debug.get("tracker_rejected_no_embedding", 0),
+                tracker_input_faces=tracker_debug.get("tracker_input_faces", 0)
+            )
         raw_detection_fallback_used = False
         fallback_decisions_count = 0
 
@@ -442,12 +825,18 @@ class Pipeline:
             confirmed_match = self._get_confirmed_match(track_key)
 
             # Track oturmadan DB arama yapma
-            if track.age < 5:
-                pass  # Yeni track — henüz güvenilir değil
-            elif track.face_embedding is not None and confirmed_match is None:
+            if track.face_embedding is None:
+                if is_ps and bool(cfg_debug.get("person_search_log_track_gates", True)):
+                    self.logger.person_search_trace("PS_TRACK_GATE_SKIP", track_id=track.track_id, reason="no_face_embedding")
+            elif confirmed_match is not None:
+                if is_ps and bool(cfg_debug.get("person_search_log_track_gates", True)):
+                    self.logger.person_search_trace("PS_TRACK_GATE_SKIP", track_id=track.track_id, reason="confirmed_match_already_exists", criminal_id=confirmed_match.criminal_id)
+            else:
                 if not track.velocity_ok:
                     self.stats["velocity_rejected"] += 1
-                else:
+                    if is_ps and bool(cfg_debug.get("person_search_log_track_gates", True)):
+                        self.logger.person_search_trace("PS_TRACK_VELOCITY_NOTE", track_id=track.track_id, velocity_ok=False)
+                if track.face_embedding is not None:
                     # Person ID ata (ilk kez görülmüşse)
                     if track_key not in self._track_to_person:
                         reid_threshold = self._dynamic_reid_threshold()
@@ -466,16 +855,17 @@ class Pipeline:
                                 pid, track.face_embedding.copy(), None, None
                             )
 
-                    # Aralıklı DB kontrolü (her _db_check_interval frame'de bir)
-                    last_check = self._last_db_check_frame.get(track_key, -9999)
-                    if self._frame_total - last_check >= self._db_check_interval:
+                    # Active modes compare every valid live embedding against the configured search scope.
+                    if track.face_embedding is not None:
+                        if is_ps and bool(cfg_debug.get("person_search_log_track_gates", True)):
+                            self.logger.person_search_trace("PS_TRACK_GATE_PASS", track_id=track.track_id, age=track.age, has_embedding=True, velocity_ok=bool(track.velocity_ok))
+                            
                         self._last_db_check_frame[track_key] = self._frame_total
                         t_db = time.perf_counter()
-                        match = self._search_in_db_cache(track.face_embedding)
+                        match = self._search_in_db_cache(track.face_embedding, track.track_id)
                         db_search_ms += (time.perf_counter() - t_db) * 1000.0
                         if match is not None:
                             self._register_vote(track_key, match, camera_id, track, frame)
-
             # ─── Person ID'yi track'e ata ───────────────────────────────
             if track_key in self._track_to_person:
                 track.global_id = f"{camera_id}-T{track.track_id}"
@@ -497,11 +887,36 @@ class Pipeline:
 
             # ─── AŞAMA 6: KARAR ────────────────────────────────────────
             t_decision = time.perf_counter()
+            
+            if is_ps and do_ps_trace:
+                self.logger.person_search_trace(
+                    "DECISION_INPUT",
+                    mode="PERSON_SEARCH",
+                    track_id=track.track_id,
+                    criminal_match_id=track.criminal_match.criminal_id if track.criminal_match else None,
+                    criminal_info_found=(criminal_info is not None),
+                    target_person_ids=list(self.target_person_ids),
+                    target_id=self.target_person_id,
+                )
+                
             decision = self.decision.evaluate(track, criminal_info)
+            
+            if is_ps and do_ps_trace:
+                self.logger.person_search_trace(
+                    "DECISION_OUTPUT",
+                    track_id=track.track_id,
+                    status=decision.status,
+                    label=decision.behavior_label,
+                    criminal_id=decision.criminal_id,
+                    confidence=float(decision.confidence),
+                    color=str(decision.color)
+                )
+                
             # Unique overlay builder için kaynak metadatası
             decision._overlay_source = "decision"
             decision._camera_id = camera_id
             decision._track_source = getattr(track, "source", "")
+            decision._updated_at = self._frame_total
             if (
                 str(decision.status).upper() == "PREDICTED"
                 or str(getattr(track, "source", "")).lower() == "predicted"
@@ -570,59 +985,26 @@ class Pipeline:
                     confidence=float(face.det_score),
                     behavior_label="normal",
                     global_id=None,
+                    time_since_update=0,
                 ))
                 results[-1]._overlay_source = "raw_fallback"
                 results[-1]._camera_id = camera_id
+                results[-1]._track_source = "raw_fallback"
+                results[-1]._updated_at = self._frame_total
                 used_boxes.append(face_bbox)
                 fallback_decisions_count += 1
                 orphan_raw_faces_drawn += 1
             raw_detection_fallback_used = fallback_decisions_count > 0
 
-        # Real detection varsa aynı bölgede PREDICTED/RAW_FALLBACK bastır
-        raw_fallback_suppressed_by_track = 0
-        real_candidates = []
-        for r in results:
-            st = str(getattr(r, "status", "")).upper()
-            src = str(getattr(r, "_track_source", "")).lower()
-            if st == "PREDICTED" or src == "predicted":
-                continue
-            if st == "RAW_FALLBACK" or src == "raw_fallback":
-                continue
-            if self._is_real_status(st):
-                real_candidates.append(r)
-        filtered_results = []
-        for r in results:
-            status_u = str(getattr(r, "status", "")).upper()
-            track_source_u = str(getattr(r, "_track_source", "")).lower()
-            is_predicted = status_u == "PREDICTED" or track_source_u == "predicted"
-            is_raw_fallback = status_u == "RAW_FALLBACK" or track_source_u == "raw_fallback"
-            if not is_predicted and not is_raw_fallback:
-                filtered_results.append(r)
-                continue
-            suppressed = False
-            for real in real_candidates:
-                same_track = (
-                    getattr(r, "track_id", None) is not None
-                    and getattr(r, "track_id", None) == getattr(real, "track_id", None)
-                    and getattr(r, "track_id", None) not in (None, 0)
-                )
-                if same_track or self._is_overlay_close(r.bbox, real.bbox):
-                    suppressed = True
-                    break
-            if suppressed:
-                if is_predicted:
-                    predicted_suppressed_by_real_detection += 1
-                else:
-                    raw_fallback_suppressed_by_track += 1
-                continue
-            filtered_results.append(r)
-        results = filtered_results
-
         unique_overlay_before = len(results)
-        # ── Overlay-level dedup / NMS ─────────────────────────────────────
         results, dedup_stats = self._deduplicate_decisions(results)
-        overlay_dedup_removed = int(dedup_stats.get("duplicate_removed_count", 0))
+        overlay_before_near_suppression = len(results)
+        results, near_stats = self._suppress_near_duplicate_overlay(results)
+        overlay_after_near_suppression = len(results)
+        overlay_dedup_removed = int(dedup_stats.get("duplicate_removed_count", 0)) + int(near_stats.get("near_duplicate_removed", 0))
         unique_overlay_after = len(results)
+        raw_fallback_suppressed_by_track = int(near_stats.get("fallback_suppressed_near_real", 0))
+        predicted_suppressed_by_real_detection += int(near_stats.get("predicted_suppressed_near_real", 0))
 
         # Ölü track'leri temizle
         active_keys = {(camera_id, t.track_id) for t in tracks}
@@ -687,6 +1069,10 @@ class Pipeline:
             "predicted_tracks_dropped_by_limit": tracker_debug.get("tracker_predicted_dropped_by_limit", 0),
             "predicted_tracks_dropped_by_dedup": int(dedup_stats.get("duplicate_removed_predicted", 0)),
             "predicted_suppressed_by_real_detection": int(predicted_suppressed_by_real_detection),
+            "tracker_stale_tracks_seen": int(tracker_debug.get("tracker_stale_tracks_seen", 0)),
+            "tracker_stale_tracks_suppressed": int(tracker_debug.get("tracker_stale_tracks_suppressed", 0)),
+            "tracker_renderable_tracks": int(tracker_debug.get("tracker_renderable_tracks", 0)),
+            "tracker_time_since_update_gt0": int(tracker_debug.get("tracker_time_since_update_gt0", 0)),
             "tracker_motion_state_dropped_by_cleanup": tracker_debug.get("tracker_motion_state_dropped_by_cleanup", 0),
             "tracker_lost_tracks": tracker_debug.get("tracker_lost_tracks", 0),
             "tracker_reacquired_tracks": tracker_debug.get("tracker_reacquired_tracks", 0),
@@ -706,6 +1092,14 @@ class Pipeline:
             "raw_fallback_suppressed_by_track": int(raw_fallback_suppressed_by_track),
             "unique_overlay_before": int(unique_overlay_before),
             "unique_overlay_after": int(unique_overlay_after),
+            "overlay_before_near_suppression": int(overlay_before_near_suppression),
+            "overlay_after_near_suppression": int(overlay_after_near_suppression),
+            "near_duplicate_removed": int(near_stats.get("near_duplicate_removed", 0)),
+            "fallback_suppressed_near_real": int(near_stats.get("fallback_suppressed_near_real", 0)),
+            "predicted_suppressed_near_real": int(near_stats.get("predicted_suppressed_near_real", 0)),
+            "same_track_duplicates_removed": int(near_stats.get("same_track_duplicates_removed", 0)),
+            "orphan_fallback_drawn": int(near_stats.get("orphan_fallback_drawn", 0)),
+            "fallback_hidden_min_hits": int(near_stats.get("fallback_hidden_min_hits", 0)),
             "overlay_dedup_enabled": self._overlay_dedup_enabled,
             "overlay_dedup_iou": self._overlay_dedup_iou,
             "overlay_dedup_removed": int(overlay_dedup_removed),
@@ -716,7 +1110,7 @@ class Pipeline:
             "duplicate_removed_same_track": int(dedup_stats.get("duplicate_removed_same_track", 0)),
             "overlay_final_decisions_count": len(results),
             "unique_overlay_count": len(results),
-            "real_faces_drawn_count": len([r for r in results if str(getattr(r, "status", "")).upper() in ("CLEAN", "TEMIZ", "TEMİZ", "UNKNOWN", "TRACKING", "TENTATIVE", "FACE", "WANTED", "CRIMINAL", "ARANIYOR")]),
+            "real_faces_drawn_count": len([r for r in results if self._status_norm(getattr(r, "status", "")) in ("CLEAN", "TEMIZ", "UNKNOWN", "TRACKING", "TENTATIVE", "FACE", "WANTED", "CRIMINAL", "ARANIYOR", "HEDEF BULUNDU")]),
         }
         return results
 
@@ -778,6 +1172,10 @@ class Pipeline:
         cid = match.criminal_id
 
         current_frame = self._frame_total
+        is_ps = (self.current_mode == "PERSON_SEARCH")
+        
+        if is_ps:
+            self.logger.person_search_trace("PS_VOTE_REGISTER_BEGIN", track_id=track.track_id, target_id=cid, score=float(match.confidence))
 
         if cid not in votes:
             votes[cid] = {"count": 0, "best_conf": 0.0, "last_frame": 0}
@@ -796,14 +1194,43 @@ class Pipeline:
         info["best_conf"] = max(info["best_conf"], match.confidence)
         info["last_frame"] = current_frame
 
+        if is_ps:
+            self.logger.person_search_trace(
+                "PS_VOTE_STATE",
+                track_id=track.track_id,
+                criminal_id=cid,
+                count=info["count"],
+                threshold=self._vote_threshold,
+                best_conf=float(info["best_conf"]),
+            )
+
         if info["count"] == self._vote_threshold:
+            if is_ps:
+                self.logger.info(
+                    f"[PERSON_SEARCH_DIRECT_MATCH_SET] track_id={track.track_id} target_id={cid} score={float(info['best_conf']):.3f}"
+                )
+                self.logger.person_search_trace(
+                    "PS_VOTE_CONFIRMED",
+                    track_id=track.track_id,
+                    criminal_id=cid,
+                    count=info["count"],
+                    best_conf=float(info["best_conf"]),
+                )
             # 3 ardışık frame eşleşmesi → suçlu onaylandı
             self.stats["total_matches"] += 1
             criminal_info = self.db.get_criminal_info(cid)
             status = criminal_info.get("status", "") if criminal_info else ""
             name = criminal_info.get("name", "?") if criminal_info else "?"
 
-            if status == "WANTED":
+            if is_ps:
+                self.logger.log(
+                    EventType.SEARCH_COMPLETED,
+                    f"HEDEF KISI BULUNDU: {name}",
+                    camera_id=camera_id,
+                    confidence=f"{match.confidence:.2f}",
+                    track_id=track.track_id
+                )
+            elif status == "WANTED":
                 self.logger.log(
                     EventType.WANTED_FOUND,
                     f"ARANAN KISI TESPIT: {name} ({self._vote_threshold} ardışık oy)",
@@ -811,7 +1238,7 @@ class Pipeline:
                     confidence=f"{match.confidence:.2f}",
                     track_id=track.track_id
                 )
-            else:
+            elif status == "CRIMINAL":
                 self.logger.log(
                     EventType.CRIMINAL_DETECTED,
                     f"Sabıkalı tespit: {name} ({self._vote_threshold} ardışık oy)",
@@ -819,6 +1246,11 @@ class Pipeline:
                     confidence=f"{match.confidence:.2f}",
                     track_id=track.track_id
                 )
+
+            elif status in ("CLEARED", "CLEAN"):
+                self.logger.info(f"[DB_MATCH_CLEAN] person_id={cid} name={name} confidence={match.confidence:.2f}")
+            else:
+                self.logger.info(f"[DB_MATCH_UNKNOWN_STATUS] person_id={cid} name={name} status={status} confidence={match.confidence:.2f}")
 
             if self._save_screenshots and frame is not None:
                 self._save_detection_screenshot(frame, track, camera_id)
@@ -842,24 +1274,95 @@ class Pipeline:
     def _get_confirmed_match(self, track_key: tuple) -> MatchResult | None:
         """Vote threshold'u aşmış en güçlü criminal match'i gerçek confidence ile döner."""
         votes = self._match_votes.get(track_key)
+        is_ps = (self.current_mode == "PERSON_SEARCH")
+        track_id = track_key[1] if len(track_key) > 1 else None
+        
         if not votes:
             return None
 
         for cid, info in votes.items():
             if info["count"] >= self._vote_threshold:
+                if is_ps:
+                    self.logger.person_search_trace("PS_CONFIRMED_MATCH_GET", track_id=track_id, result=True, criminal_id=cid, confidence=float(info["best_conf"]))
                 return MatchResult(criminal_id=cid, confidence=info["best_conf"])
 
+        if is_ps:
+            # Sadece ID ve count map'i gönderelim
+            vote_summary = {str(k): v["count"] for k,v in votes.items()}
+            self.logger.person_search_trace("PS_CONFIRMED_MATCH_GET", track_id=track_id, result=False, votes=str(vote_summary))
+            
         return None
 
     # ──────────────────────────────────────────────────────────────────────
-    def _search_in_db_cache(self, embedding: np.ndarray) -> MatchResult | None:
+    def _search_in_db_cache(self, embedding: np.ndarray, track_id: int = None) -> MatchResult | None:
         """DB cache üzerinden embedding karşılaştırma."""
+        
+        # PERSON_SEARCH modundaysa sadece hedef kişiyi ara
+        if self.current_mode == "PERSON_SEARCH":
+            if not self._person_search_embeddings:
+                self.logger.person_search_trace("PS_SEARCH_FAIL", reason="targets_embedding_none")
+                return None
+            if embedding is None:
+                self.logger.person_search_trace("PS_SEARCH_FAIL", reason="live_embedding_none")
+                return None
+
+            tid = track_id if track_id is not None else -1
+            self.logger.info(
+                f"[PERSON_SEARCH_SEARCH_ENTER] track_id={tid} targets={list(self._person_search_embeddings.keys())}"
+            )
+
+            cfg = self.config.get("face", {}).get("person_search", {}) if hasattr(self.config, "get") else {}
+            min_thr = float(cfg.get("cosine_threshold", 0.50))
+
+            best_pid = None
+            best_score = -1.0
+            for cand_id, targ_emb in self._person_search_embeddings.items():
+                try:
+                    score = self.face_analyzer.compare(embedding, targ_emb)
+                except Exception as e:
+                    self.logger.person_search_trace(
+                        "PS_SEARCH_FAIL",
+                        reason="compare_exception",
+                        candidate_id=cand_id,
+                        error=str(e),
+                    )
+                    continue
+                if score > best_score:
+                    best_score = score
+                    best_pid = cand_id
+
+            if best_pid is None or best_score < 0:
+                self.logger.person_search_trace("PS_SEARCH_FAIL", reason="compare_all_failed")
+                return None
+
+            self.logger.info(
+                f"[PERSON_SEARCH_SCORE] track_id={tid} best_target_id={best_pid} "
+                f"score={best_score:.4f} threshold={min_thr:.4f}"
+            )
+
+            if best_score >= min_thr:
+                self.logger.info(
+                    f"[PERSON_SEARCH_MATCH] track_id={tid} target_id={best_pid} score={best_score:.4f}"
+                )
+                return MatchResult(criminal_id=int(best_pid), confidence=float(best_score))
+
+            self.logger.info(
+                f"[PERSON_SEARCH_NO_MATCH] track_id={tid} best_target_id={best_pid} score={best_score:.4f}"
+            )
+            return None
+
+        # GENERAL — tam veritabanı embeddings listesi
+        tid = track_id if track_id is not None else -1
+        nemb = len(self._cached_embeddings)
+        self.logger.info(f"[GENERAL_SEARCH_ENTER] track_id={tid} db_embeddings={nemb}")
+
         best_cid = None
         best_score = 0.0
         second_score = 0.0
 
         for cid, db_emb in self._cached_embeddings:
             score = self.face_analyzer.compare(embedding, db_emb)
+            self.logger.info(f"[GENERAL_SEARCH_SCORE] track_id={tid} candidate_id={cid} score={score:.4f}")
             if score > best_score:
                 second_score = best_score
                 best_score = score
@@ -867,14 +1370,23 @@ class Pipeline:
             elif score > second_score:
                 second_score = score
 
-        # Genel threshold + ek güvenlik eşiği + top1/top2 ayrımı.
         min_thr = max(self.face_analyzer.threshold, self._db_match_min_threshold)
         if best_cid is None or best_score < min_thr:
+            self.logger.info(
+                f"[GENERAL_SEARCH_NO_MATCH] track_id={tid} best_score={best_score:.4f} threshold={min_thr:.4f}"
+            )
             return None
 
         if (best_score - second_score) < self._db_match_min_margin:
+            self.logger.info(
+                f"[GENERAL_SEARCH_NO_MATCH] track_id={tid} best_score={best_score:.4f} threshold={min_thr:.4f} "
+                f"reason=ambiguous_margin second_best={second_score:.4f}"
+            )
             return None
 
+        self.logger.info(
+            f"[GENERAL_SEARCH_MATCH] track_id={tid} person_id={best_cid} score={best_score:.4f} threshold={min_thr:.4f}"
+        )
         return MatchResult(criminal_id=best_cid, confidence=best_score)
 
     # ──────────────────────────────────────────────────────────────────────
@@ -920,6 +1432,9 @@ class Pipeline:
         for k in list(self._track_to_person.keys()):
             if k[0] == camera_id:
                 del self._track_to_person[k]
+        for k in list(self._fallback_hits.keys()):
+            if k[0] == camera_id:
+                del self._fallback_hits[k]
 
         # TrackRegistry ve Tracker
         self.track_registry.clear_camera(camera_id)

@@ -56,6 +56,8 @@ SEP        = "#E5E2DC"
 STATUS_COLORS = {
     "WANTED":     (RED,    RED_DIM,    "ARANIYOR"),
     "CRIMINAL":   (AMBER,  AMBER_DIM,  "SABIKALI"),
+    "HEDEF BULUNDU": (GOLD, GOLD_DIM, "HEDEF BULUNDU"),
+    "TARGET_FOUND":  (GOLD, GOLD_DIM, "HEDEF BULUNDU"),
     "CLEARED":    (GREEN,  "#D1FAE5",  "TEMİZ"),
     "SUSPICIOUS": (PURPLE, PURPLE_DIM, "ŞÜPHELİ"),
     "UNKNOWN":    (GRAY_1, BG_ROW_ALT, "BİLİNMİYOR"),
@@ -118,18 +120,20 @@ QPushButton#btn_gold, QPushButton#btn_accent {{
     background: {ACCENT};
     color: #FFFFFF;
     border: none;
-    font-size: 13px;
+    font-size: 14px;
     font-weight: 700;
     border-radius: 12px;
     padding: 14px 32px;
     letter-spacing: 0.3px;
+    min-height: 52px;
 }}
 QPushButton#btn_gold:hover, QPushButton#btn_accent:hover {{
     background: {ACCENT_DIM};
 }}
 QPushButton#btn_gold:disabled, QPushButton#btn_accent:disabled {{
-    background: {BORDER};
-    color: {TEXT_3};
+    background: #D8D2CC;
+    color: #777777;
+    border: 1px solid #C5BEB6;
 }}
 
 /* ── Tehlike Butonu ── */
@@ -139,7 +143,8 @@ QPushButton#btn_red {{
     border: 1px solid {RED}30;
     font-weight: 600;
     border-radius: 12px;
-    padding: 9px 22px;
+    padding: 10px 18px;
+    min-height: 52px;
 }}
 QPushButton#btn_red:hover {{
     background: {RED};
@@ -147,9 +152,55 @@ QPushButton#btn_red:hover {{
     border-color: {RED};
 }}
 QPushButton#btn_red:disabled {{
-    background: {SURFACE_2};
-    color: {TEXT_3};
-    border-color: {BORDER};
+    background: #F0EDEA;
+    color: #999999;
+    border: 1px solid #D8D2CC;
+}}
+
+/* ── Mod ekranı — footer + Başlat/Durdur (ModePage / mode_footer) ── */
+QWidget#mode_footer {{
+    background-color: {BG_PANEL};
+    border-top: 1px solid {BORDER};
+}}
+
+QPushButton#btn_start {{
+    background-color: #e85d2a;
+    color: #ffffff;
+    border: none;
+    border-radius: 12px;
+    font-weight: 700;
+    font-size: 14px;
+    padding: 0 18px;
+    min-height: 52px;
+    max-height: 52px;
+}}
+QPushButton#btn_start:hover:enabled {{
+    background-color: #f06a36;
+}}
+QPushButton#btn_start:disabled {{
+    background-color: #d8d2cc;
+    color: #777777;
+    border: 1px solid #c8c0b8;
+}}
+
+QPushButton#btn_stop {{
+    background-color: #fff5f2;
+    color: #c0392b;
+    border: 1px solid #e0b4aa;
+    border-radius: 12px;
+    font-weight: 700;
+    font-size: 14px;
+    padding: 0 18px;
+    min-height: 52px;
+    max-height: 52px;
+}}
+QPushButton#btn_stop:hover:enabled {{
+    background-color: #ffe8e2;
+}}
+QPushButton#btn_stop:disabled {{
+    background-color: #f0ede8;
+    color: #999999;
+    border: 1px solid #ddd6ce;
 }}
 
 /* ── Dark Butonu (sidebar içi) ── */

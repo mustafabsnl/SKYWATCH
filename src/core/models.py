@@ -79,3 +79,4 @@ class DecisionResult:
     confidence: float = 0.0
     behavior_label: str = "normal"
     global_id: str | None = None
+    time_since_update: int = 0
