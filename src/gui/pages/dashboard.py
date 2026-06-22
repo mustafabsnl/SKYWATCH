@@ -92,6 +92,56 @@ class AlertItem(QWidget):
         """)
 
 
+# ── KPI yanında: kutu renkleri göstergesi ───────────────────────────────────
+class StatusColorLegend(QWidget):
+    """Izleme ekranı — OpenCV kutularıyla uyumlu renk açıklamaları (sabit panel)."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("StatusColorLegend")
+        self.setMinimumWidth(200)
+        self.setMaximumWidth(240)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+
+        rows = (
+            ("#DC2626", "Aranıyor"),
+            ("#2563EB", "Temiz"),
+            ("#6B6B6B", "Bilinmiyor"),
+            ("#CA8A04", "Hedef bulundu"),
+            ("#D97706", "Sabıkalı"),
+        )
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(12, 10, 12, 10)
+        outer.setSpacing(6)
+
+        title = QLabel("Durum renkleri")
+        title.setFont(QFont("Segoe UI Semibold", 10, QFont.Weight.Bold))
+        title.setStyleSheet(f"color: {TEXT_2}; letter-spacing: 0.02em;")
+        outer.addWidget(title)
+
+        for hex_color, text in rows:
+            row = QHBoxLayout()
+            row.setSpacing(10)
+            sw = QLabel()
+            sw.setFixedSize(14, 14)
+            sw.setStyleSheet(f"background:{hex_color}; border-radius:3px; border:none;")
+            lab = QLabel(text)
+            lab.setFont(QFont("Segoe UI", 9))
+            lab.setStyleSheet(f"color: {TEXT_1};")
+            row.addWidget(sw, 0, Qt.AlignmentFlag.AlignVCenter)
+            row.addWidget(lab, 1)
+            outer.addLayout(row)
+
+        self.setStyleSheet(
+            f"""#StatusColorLegend {{
+                background:{SURFACE};
+                border:1px solid {BORDER};
+                border-radius:10px;
+            }}"""
+        )
+
+
 # ── Kamera Feed ───────────────────────────────────────────────────────────────
 class CameraFeed(QWidget):
     """Kamera görüntüsü + PulseRing overlay."""
@@ -199,7 +249,9 @@ class DashboardPage(QWidget):
 
         self._m_fps = MetricCard("FPS", "—", "kare/saniye", ACCENT, "◎")
         self._m_active = MetricCard("Aktif Track", "0", "kişi izleniyor", ACCENT_2, "◉")
+        self._legend = StatusColorLegend()
         pol = QSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        legend_pol = QSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         for m in (self._m_fps, self._m_active):
             m.setSizePolicy(pol)
             m.setMinimumWidth(200)
@@ -208,6 +260,8 @@ class DashboardPage(QWidget):
         metrics.addStretch(1)
         metrics.addWidget(self._m_fps, 1)
         metrics.addWidget(self._m_active, 1)
+        self._legend.setSizePolicy(legend_pol)
+        metrics.addWidget(self._legend, 0, Qt.AlignmentFlag.AlignTop)
         metrics.addStretch(1)
 
         left.addLayout(metrics)

@@ -1,7 +1,7 @@
 # SKYWATCH — Face Detection Model Training Config
 # YOLO formatı (single class: face)
 
-path: C:/Users/musta/OneDrive/Desktop/SKYWATCH/archive
+path: ./archive  # Veri seti dizininizi buraya yazın
 
 train: images/train
 val: images/val

@@ -654,6 +654,7 @@ class MainWindow(QMainWindow):
                 fallback_suppress_center_factor=fallback_suppress_center_factor,
                 fallback_suppress_min_center_px=fallback_suppress_min_center_px,
                 fallback_suppress_iou=fallback_suppress_iou,
+                trace_logger=self._logger,
             )
             try:
                 import torch
@@ -1212,7 +1213,11 @@ class MainWindow(QMainWindow):
                 last_ts = self._last_inference_ts.get(cam_id, 0.0)
                 last_process_ms = self._last_process_ms.get(cam_id, 0.0)
             age = time.time() - last_ts if last_ts else 1e9
-            displayed_with_cached_decisions = bool(decisions and age <= ttl_sec)
+            # Round-robin inference: her kameranın last_ts'i sadece o kamera işlendiğinde yenilenir.
+            # Kısa decision_ttl_sec ile age çoğu zaman > ttl olur → renderer hiç çağrılmaz (kutular kaybolur).
+            # Overlay için karar varsa ve pipeline hazırsa her zaman çiz (bayatlık sadece log/metrik).
+            can_draw_overlay = bool(decisions and self._renderer is not None and self._pipeline is not None)
+            displayed_with_cached_decisions = can_draw_overlay
             if frame is None:
                 draw_frame = self._no_signal_frame(cam_id)
                 self._no_signal_since.setdefault(cam_id, time.time())
@@ -1220,7 +1225,13 @@ class MainWindow(QMainWindow):
                 self._last_raw_frames[cam_id] = frame
                 draw_frame = frame
                 self._no_signal_since.pop(cam_id, None)
-                if displayed_with_cached_decisions and self._renderer is not None and self._pipeline is not None:
+                if displayed_with_cached_decisions:
+                    if self._logger and (self._display_frame_count % 90 == 0):
+                        self._logger.info(
+                            f"[DISPLAY_RENDER_CALL] camera_id={cam_id} "
+                            f"decisions_for_camera={len(decisions)} "
+                            f"age_sec={round(age, 3)} ttl_ref={ttl_sec}"
+                        )
                     original_decisions_count = len(decisions)
                     render_decisions = decisions
                     local_tracker_display_failed = False
@@ -1246,7 +1257,20 @@ class MainWindow(QMainWindow):
                                 self._run_logger.log_error("LOCAL_TRACKER_DISPLAY_FAILED", e, camera_id=cam_id)
                     try:
                         draw_frame = frame.copy()
-                        draw_frame = self._renderer.draw(draw_frame, render_decisions, self._pipeline.stats, criminal_names)
+                        draw_frame = self._renderer.draw(
+                            draw_frame,
+                            render_decisions,
+                            self._pipeline.stats,
+                            criminal_names,
+                            camera_id=cam_id,
+                            trace_logger=self._logger,
+                        )
+                        if self._logger and (self._display_frame_count % 90 == 0):
+                            h0, w0 = draw_frame.shape[:2]
+                            self._logger.info(
+                                f"[DISPLAY_RENDER_DONE] camera_id={cam_id} "
+                                f"annotated_shape={[h0, w0]}"
+                            )
                         active_total += len(render_decisions)
                     except Exception as e:
                         if self._run_logger is not None:
@@ -1302,6 +1326,12 @@ class MainWindow(QMainWindow):
                 )
         if should_log_camera_status:
             self._last_camera_log_ts = now
+        if self._logger and (self._display_frame_count % 120 == 0):
+            nc = len(cam_ids)
+            nd = sum(len(self._last_decisions.get(cid, []) or []) for cid in self._selected_cameras)
+            self._logger.info(
+                f"[DISPLAY_TICK] cameras={len(frames)} selected={nc} cached_decisions_total={nd}"
+            )
         composed = self._compose_grid(frames, cam_ids)
         now = time.time()
         dt = max(1e-6, now - self._display_last_tick)
@@ -1311,6 +1341,9 @@ class MainWindow(QMainWindow):
         self._display_frame_count += 1
         total_faces = int(self._pipeline.stats.get("total_faces_scanned", 0)) if self._pipeline else 0
         total_alerts = len(self._alerted_tracks)
+        if self._logger and (self._display_frame_count % 120 == 0):
+            hc, wc = composed.shape[:2]
+            self._logger.info(f"[DISPLAY_FRAME_SET] source=annotated_grid shape={[hc, wc]}")
         self.pg_dash.update_frame(composed)
         self.pg_dash.update_stats(self._display_fps_smooth, active_total, total_faces, total_alerts)
         for tid, status, name in list(self._pending_alerts):

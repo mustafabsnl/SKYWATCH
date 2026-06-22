@@ -1,25 +1,18 @@
 # 🔍 SKYWATCH — Akıllı Güvenlik Platformu
 
-**Gerçek Zamanlı Yüz Tanıma Tabanlı Suçlu Tespiti ve Kişi Takip Sistemi**
+**Gerçek Zamanlı Yüz Tanıma Tabanlı Kişi Tespiti ve Takip Sistemi**
 
 [![Python](https://img.shields.io/badge/Python-3.11+-blue)](https://python.org)
 [![CUDA](https://img.shields.io/badge/CUDA-12.6-green)](https://developer.nvidia.com/cuda-toolkit)
 [![License](https://img.shields.io/badge/License-MIT-grey)](LICENSE)
-venv\Scripts\python.exe src\run_gui.py
+
 ---
 
-## 🎯 Ne Yapar?
+## 🎯 Proje Hakkında
 
-SKYWATCH, güvenlik kameralarından gelen görüntüyü gerçek zamanlı olarak işleyerek kameradaki kişilerin yüzlerini **suçlu veritabanıyla** karşılaştırır. Eşleşme tespit edildiğinde anlık uyarı üretir.
+SKYWATCH, güvenlik kameralarından gelen görüntüyü gerçek zamanlı olarak işleyerek kişileri tespit eden ve frameler arası kesintisiz takibini sağlayan bir bilgisayarlı görü projesidir.
 
-| Özellik | Açıklama |
-|---------|----------|
-| **Suçlu Tespiti** | Kameradaki yüzler veritabanındaki suçlu kayıtlarıyla karşılaştırılır |
-| **Anlık Uyarı** | Eşleşme bulunduğunda alarm ve tespit kaydı üretilir |
-| **Kişi Takibi** | DeepSORT ile her kişiye sabit ID atanır, frameler arası takip sağlanır |
-| **Hareket Analizi** | Hız, yön, bekleme süresiyle şüpheli davranış skorlaması yapılır |
-| **Aktif Arama** | *(Geliştirme aşamasında)* Fotoğraf yükleyerek kameralarda kişi arama |
-| **Multi-Camera** | *(Geliştirme aşamasında)* Kameralar arası geçiş takibi |
+Algılama tarafında klasik YOLOv8 mimarisini olduğu gibi kullanmak yerine, projenin ihtiyaçları doğrultusunda ek katmanlar (CBAM Attention, P2 Head, Feature Refinement) entegre edilerek model özelleştirilmiştir. ONNX Runtime ve CUDA ile GPU hızlandırması sayesinde frame başına ortalama **~50ms** işlem süresine ulaşılmıştır.
 
 ---
 
@@ -29,13 +22,16 @@ SKYWATCH, güvenlik kameralarından gelen görüntüyü gerçek zamanlı olarak 
 Kamera Görüntüsü
       │
       ▼
-  Yüz Algılama         ← GPU ile gerçek zamanlı (50ms/frame)
+  Yüz Algılama              ← SKYWATCH-Det (Custom YOLOv8 + CBAM)
       │
       ▼
-  Kişi Takibi          ← DeepSORT (Track ID atama)
+  Embedding Çıkarımı         ← InsightFace ArcFace (buffalo_l, 512-d)
       │
       ▼
-  Suçlu DB Sorgusu     ← Yüz vektörü → SQLite embedding karşılaştırması
+  Kişi Takibi                ← DeepSORT (benzersiz Track ID)
+      │
+      ▼
+  Veritabanı Karşılaştırması ← SQLite üzerinde cosine similarity
       │
    ┌──┴──┐
    │     │
@@ -47,92 +43,95 @@ Eşleşme  Eşleşme Yok
 
 ---
 
-## 👤 Kişi Takip Sistemi (Tracking)
+## 🧠 Model Mimarisi — SKYWATCH-Det
 
-Takip sistemi, SKYWATCH'ın en kritik bileşenlerinden biridir. Yalnızca yüz tanımak yeterli değildir — sistemin kişiyi **sürekli izlemesi**, **kaybetmemesi** ve **davranışını analiz etmesi** gerekmektedir.
+Standart bir YOLO modeli kullanmak yerine, güvenlik kamerası senaryolarına özel bir mimari tasarlandı:
 
-### Track ID Mantığı
+| Bileşen | Açıklama |
+|---------|----------|
+| **Base** | YOLOv11m-equivalent backbone (depth=0.67, width=0.75) |
+| **P2 Detection Head** | 4 ölçekli algılama (P2/P3/P4/P5) — 10×10px kadar küçük yüzleri yakalamak için |
+| **C2f_CAM** | P2 seviyesinde CBAM tabanlı bağlamsal dikkat — kalabalık sahnelerde yan yana yüzleri ayırmak için |
+| **FRM** | Backbone sonrası Feature Refinement — bulanık kamera görüntülerinde kenar/doku detayını kurtarmak için |
+| **Custom Loss** | Adaptif büyüklük ağırlıklı loss — küçük yüzlere daha yüksek loss ağırlığı atayan özel fonksiyon |
 
-Kameraya giren her kişiye **benzersiz bir Track ID** atanır. Bu ID şu özelliklere sahiptir:
-
-- Kişi kısa süre görüş alanından çıkıp geri dönse bile **aynı ID korunur**
-- Yüz embedding'i ile ilişkilendirildiğinden suçlu eşleşmesi **her frame'de tekrar sorgulanmaz** — bir kez eşleşti mi o track için kayıt açılır
-- Kişi tamamen kaybolduğunda track sonlandırılır ve log kaydı oluşturulur
-
-### Hareket Analizi
-
-Her aktif track için `MovementAnalyzer` modülü şu verileri hesaplar:
-
-| Metrik | Açıklama |
-|--------|----------|
-| **Anlık Hız** | Son 2 frame arası piksel/frame mesafesi |
-| **Ortalama Hız** | Son 30 frame üzerinden hesaplanan ortalama |
-| **Yön Vektörü** | Hareket yönü (dx, dy) |
-| **Bekleme Süresi** | Kişi hareket etmeden aynı bölgede kaldığı süre (sn) |
-| **Ani Yön Değişimi** | Son 10 frame içinde açısal sapma 90°'yi aşarsa tetiklenir |
-| **Rota** | Son 30 noktanın (x, y) koordinat geçmişi |
-
-### Davranış Skoru
-
-Her kişiye 0.0 – 1.0 arasında bir **davranış skoru** hesaplanır:
-
-```
-Koşma (hız > eşik)        → +0.35
-Hızlı hareket              → +0.20
-Uzun bekleme               → +0.15
-Ani yön değişimi           → +0.10
-─────────────────────────────────
-Skor ≥ 0.5  → SUSPICIOUS (Şüpheli)
-Skor < 0.5  → NORMAL
-```
-
-### Planlanan Geliştirmeler
-
-- **Kameralar Arası Takip:** Kişi bir kameradan çıkıp komşu kameraya girdiğinde yüz embedding'i ile aynı kişi olarak tanınacak ve Track ID sürekliliği sağlanacak
-- **Rota Görselleştirme:** Kişinin kamera içindeki hareket rotası ekranda çizilecek
-- **Zaman Bazlı Analiz:** Belirli bir bölgede anormal sıklıkta görünen kişiler otomatik işaretlenecek
+Eğitim WIDER FACE veri seti üzerinde (32.203 görüntü, ~393K yüz) gerçekleştirilmiştir.
 
 ---
 
-## 🗄️ Suçlu Veritabanı
+## 👤 Kişi Takip Sistemi
 
-Sistemde yalnızca **suçlu kayıtları** tutulur. Her kayıt şunları içerir:
+Her kişiye **DeepSORT** ile benzersiz bir Track ID atanır. Kişi görüş alanından kısa süre çıkıp geri dönse bile bu ID korunur. Takip verisinin üzerine, özel `MovementAnalyzer` modülü ile davranış analizi yapılır:
 
-| Alan | Açıklama |
-|------|----------|
-| Ad / Soyad | Kişi kimlik bilgisi |
-| Suç Türü | İşlenen suçun kategorisi |
-| Tehlike Seviyesi | LOW / MEDIUM / HIGH / CRITICAL |
-| Durum | WANTED (Aranan) / CRIMINAL (Sabıkalı) |
-| Yüz Vektörü | 512 boyutlu ArcFace embedding |
-| Fotoğraf | Referans yüz fotoğrafı |
+| Metrik | Açıklama |
+|--------|----------|
+| **Anlık / Ortalama Hız** | Piksel/frame mesafesi (son 30 frame ortalaması) |
+| **Yön Vektörü** | Hareket yönü (dx, dy) |
+| **Bekleme Süresi** | Aynı bölgede hareketsiz kalma süresi |
+| **Ani Yön Değişimi** | 90°'yi aşan açısal sapma tespiti |
+| **Davranış Skoru** | 0.0–1.0 arası şüpheli davranış skorlaması |
 
-Veritabanına yeni suçlu eklemek için:
+---
 
-```python
-from database.db import Database
-db = Database(config, logger)
-db.add_criminal(
-    name="Ad Soyad",
-    embedding=face_embedding,   # FaceAnalyzer ile çıkarılır
-    crime_type="Hırsızlık",
-    danger_level="HIGH",
-    status="WANTED"
-)
-```
+## 🗄️ Veritabanı ve Tanıma
+
+Embedding vektörleri (512-d ArcFace) SQLite üzerinde saklanır. Her frame'de tespit edilen yüzler, veritabanındaki kayıtlarla cosine similarity ile karşılaştırılır. Sistem iki modda çalışır:
+
+- **GENERAL** — Tüm veritabanı taranır, eşleşen kişi anlık olarak işaretlenir
+- **PERSON_SEARCH** — Belirli bir kişi hedef alınarak aktif arama yapılır
 
 ---
 
 ## 🛠️ Teknoloji Yığını
 
 | Bileşen | Teknoloji |
-|---------|-----------|
-| Yüz Algılama & Embedding | ArcFace mimarisi (geliştirme aşamasında) |
+|---------|-----------| 
+| Yüz Algılama | SKYWATCH-Det (Custom YOLOv8 + CBAM + P2 Head) |
+| Yüz Tanıma / Embedding | InsightFace ArcFace (buffalo_l) |
 | GPU Hızlandırma | ONNX Runtime + CUDA 12.6 |
 | Kişi Takibi | DeepSORT Realtime |
-| Hareket Analizi | Özel `MovementAnalyzer` modülü |
+| Hareket Analizi | Özel MovementAnalyzer modülü |
 | Veritabanı | SQLite (embedding blob desteği) |
+| GUI | PyQt5 |
 | Dil | Python 3.11+ |
+
+---
+
+## ⚙️ Mimari Tasarım
+
+Sistem, **Facade pattern** ile orkestre edilen, threaded pipeline üzerine kurulu modüler bir yapıdadır. Sorumluluklar katmanlara ayrılmıştır:
+
+```
+SKYWATCH/
+├── config/
+│   └── config.yaml              # Tüm sistem ayarları
+├── src/
+│   ├── main.py                  # Giriş noktası (GPU setup + threaded pipeline)
+│   ├── core/
+│   │   ├── face_analyzer.py     # YOLO algılama + InsightFace embedding
+│   │   ├── tracker.py           # DeepSORT wrapper (kişi takibi)
+│   │   ├── movement.py          # Hareket & davranış analizi
+│   │   ├── gmc.py               # Global Motion Compensation
+│   │   └── models.py            # Veri modelleri (dataclass)
+│   ├── database/
+│   │   └── db.py                # Kişi kaydı, embedding, tespit logu
+│   ├── engine/
+│   │   ├── pipeline.py          # Ana orkestratör (Facade pattern)
+│   │   ├── renderer.py          # Overlay çizimi
+│   │   ├── camera_manager.py    # Kamera akışı yönetimi
+│   │   └── decision.py          # Karar motoru (CLEAN/SUSPICIOUS/WANTED)
+│   ├── model/
+│   │   ├── train_skywatch.py    # Model eğitim scripti
+│   │   ├── skywatch_loss.py     # Adaptif küçük yüz ağırlıklı custom loss
+│   │   └── skywatch_trainer.py  # Trainer konfigürasyonu
+│   ├── gui/
+│   │   └── main_window.py       # PyQt5 masaüstü arayüz
+│   └── utils/
+│       ├── config.py            # AppConfig
+│       └── logger.py            # EventLogger
+├── database/                    # SQLite DB + kişi fotoğrafları
+└── logs/                        # Event logları + tespit ekran görüntüleri
+```
 
 ---
 
@@ -151,73 +150,27 @@ venv\Scripts\activate        # Windows
 pip install -r requirements.txt
 
 # 3. Çalıştır
-python src/main.py
+venv\Scripts\python.exe src\run_gui.py
 ```
 
 > **Not:** `config/config.yaml` dosyasındaki `source` alanını kamera numaranız (0, 1) veya video dosya yoluyla güncelleyin.
 
 ---
 
-## ⚙️ Konfigürasyon
-
-```yaml
-cameras:
-  - id: "CAM_01"
-    source: 0             # 0 = webcam, "video.mp4" = dosya
-    name: "Ana Giriş"
-
-face:
-  similarity_threshold: 0.45   # Suçlu eşleşme eşiği
-
-movement:
-  speed_threshold_fast: 50
-  dwell_time_threshold: 120
-```
-
----
-
-## 📁 Proje Yapısı
-
-```
-SKYWATCH/
-├── config/
-│   └── config.yaml            # Tüm sistem ayarları
-├── src/
-│   ├── main.py                # Giriş noktası (GPU setup + threaded pipeline)
-│   ├── core/
-│   │   ├── face_analyzer.py   # Yüz algılama & embedding çıkarımı
-│   │   ├── tracker.py         # DeepSORT wrapper (kişi takibi)
-│   │   ├── movement.py        # Hareket & davranış analizi
-│   │   └── models.py          # Veri modelleri (dataclass)
-│   ├── database/
-│   │   └── db.py              # Suçlu kaydı, embedding, tespit logu
-│   ├── engine/
-│   │   ├── pipeline.py        # Ana orkestratör (Facade pattern)
-│   │   ├── renderer.py        # Overlay çizimi (SRP)
-│   │   ├── camera_manager.py  # Kamera akışı yönetimi
-│   │   └── decision.py        # Karar motoru (CLEAN/SUSPICIOUS/WANTED)
-│   └── utils/
-│       ├── config.py          # AppConfig
-│       ├── logger.py          # EventLogger
-│       └── gpu_setup.py       # cuDNN DLL path fix (Windows)
-├── database/                  # SQLite DB + suçlu fotoğrafları
-└── logs/                      # Event logları + tespit ekran görüntüleri
-```
-
----
-
 ## 📌 Geliştirme Durumu
 
-- [x] AŞAMA 1: Ortam & Temel Altyapı
-- [x] AŞAMA 2: Yüz Algılama + GPU
-- [x] AŞAMA 3: Suçlu Veritabanı + Embedding Eşleştirme
-- [x] AŞAMA 4: Kişi Takibi + Threaded Pipeline + Overlay
-- [ ] AŞAMA 5: Multi-Camera + Aktif Arama
-- [ ] AŞAMA 6: GUI Arayüz
-- [ ] AŞAMA 7: Model Geliştirme & Entegrasyon Test
+- [x] Ortam & Temel Altyapı
+- [x] Yüz Algılama + GPU Hızlandırma
+- [x] Veritabanı + Embedding Eşleştirme
+- [x] Kişi Takibi + Threaded Pipeline + Overlay
+- [x] Custom Model (CBAM + P2 Head + FRM)
+- [x] Custom Loss (Adaptif Küçük Yüz Ağırlıklı)
+- [x] GUI Arayüz (PyQt5)
+- [ ] Kameralar Arası Geçiş Takibi
+- [ ] Model Optimizasyonu & Entegrasyon Test
 
 ---
 
 ## 📄 Lisans
 
-MIT © 2025 mustafabsnl
+MIT © 2026 mustafabsnl

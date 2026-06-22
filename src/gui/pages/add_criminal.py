@@ -10,7 +10,7 @@ import cv2
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QLineEdit, QComboBox, QFileDialog, QMessageBox, QGridLayout
+    QLineEdit, QComboBox, QFileDialog, QMessageBox, QGridLayout, QSizePolicy,
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QPixmap, QImage, QFont, QDragEnterEvent, QDropEvent, QColor, QPainter, QBrush
@@ -33,6 +33,35 @@ _EMBED_SIZE = 64
 _EMBED_DIM  = 512
 
 
+def _fit_pixmap_contain(src: QPixmap, box_w: int, box_h: int, bg: str = SURFACE) -> QPixmap:
+    """Görseli kutuya oran koruyarak sığdırır (letterbox); kırpma yok."""
+    box_w = max(1, int(box_w))
+    box_h = max(1, int(box_h))
+    if src.isNull():
+        out = QPixmap(box_w, box_h)
+        out.fill(QColor(bg))
+        return out
+    scaled = src.scaled(
+        box_w,
+        box_h,
+        Qt.AspectRatioMode.KeepAspectRatio,
+        Qt.TransformationMode.SmoothTransformation,
+    )
+    canvas = QPixmap(box_w, box_h)
+    canvas.fill(QColor(bg))
+    painter = QPainter(canvas)
+    x = (box_w - scaled.width()) // 2
+    y = (box_h - scaled.height()) // 2
+    painter.drawPixmap(x, y, scaled)
+    painter.end()
+    return canvas
+
+
+def _bgr_to_fit_pixmap(img_bgr: np.ndarray, box_w: int, box_h: int) -> QPixmap:
+    rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+    h, w, ch = rgb.shape
+    qimg = QImage(rgb.data, w, h, ch * w, QImage.Format.Format_RGB888).copy()
+    return _fit_pixmap_contain(QPixmap.fromImage(qimg), box_w, box_h)
 
 
 def _read_image(path: str) -> np.ndarray | None:
@@ -163,38 +192,34 @@ class EmbedWorker(QThread):
             # İsteğe bağlı olarak burada uyarı döndürülebilir, ama şimdilik devam edip kullanıcıya seçtiriyoruz.
 
         preview = img.copy()
+        ph, pw = preview.shape[:2]
+        ref = max(1, min(pw, ph))
         for face in faces:
             x1, y1, x2, y2 = face["bbox"]
             fid = face["face_id"]
+            thick = max(2, int(round(ref / 280)))
+            cv2.rectangle(preview, (x1, y1), (x2, y2), (0, 0, 255), thick)
 
-            # Daha belirgin gorunum: dis siyah + ic kirmizi cift cerceve
-            cv2.rectangle(preview, (x1 - 3, y1 - 3), (x2 + 3, y2 + 3), (0, 0, 0), 4)
-            cv2.rectangle(preview, (x1, y1), (x2, y2), (0, 0, 255), 6)
-
-            # ID etiketi: cok daha buyuk ve net gorunur badge
             label = f"ID {fid}"
-            font_scale = 2.0
-            font_thickness = 6
-            (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, font_thickness)
-            pad_x = 22
-            pad_y = 18
-            min_w = 150
-            box_w = max(tw + (pad_x * 2), min_w)
-            box_h = th + (pad_y * 2)
-            ly1 = max(0, y1 - box_h - 8)
-            ly2 = max(0, y1 - 4)
-            lx2 = min(preview.shape[1] - 1, x1 + box_w)
-            cv2.rectangle(preview, (x1, ly1), (lx2, ly2), (0, 0, 255), -1)
-            cv2.rectangle(preview, (x1, ly1), (lx2, ly2), (0, 0, 0), 3)
+            fs = max(0.45, min(0.85, ref / 900.0))
+            th = max(1, thick - 1)
+            (tw, th_txt), bl = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, fs, th)
+            pad_x, pad_y = 6, 5
+            lx1 = x1
+            ly2 = max(bl + 2, y1 - 4)
+            ly1 = max(0, ly2 - th_txt - pad_y * 2)
+            lx2 = min(pw - 1, lx1 + tw + pad_x * 2)
+            cv2.rectangle(preview, (lx1, ly1), (lx2, ly2), (30, 30, 34), -1)
+            cv2.rectangle(preview, (lx1, ly1), (lx2, ly2), (0, 0, 255), 1)
             cv2.putText(
                 preview,
                 label,
-                (x1 + pad_x, ly2 - pad_y),
+                (lx1 + pad_x, ly2 - pad_y),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                font_scale,
+                fs,
                 (255, 255, 255),
-                font_thickness,
-                cv2.LINE_AA
+                th,
+                cv2.LINE_AA,
             )
 
         self.finished.emit(faces, preview, "")
@@ -294,8 +319,12 @@ class PhotoZone(QLabel):
         self.setAcceptDrops(True)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._path = None
+        self._source_px: QPixmap | None = None
+        self._preview_bgr: np.ndarray | None = None
         self._empty()
         self.setCursor(Qt.CursorShape.PointingHandCursor)
+        sp = QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.setSizePolicy(sp)
 
     def _empty(self):
         self.setPixmap(QPixmap())
@@ -345,19 +374,43 @@ class PhotoZone(QLabel):
             if Path(p).suffix.lower() in (".jpg", ".jpeg", ".png", ".bmp", ".webp"):
                 self._load(p)
 
+    def _display_box_size(self) -> tuple[int, int]:
+        return max(120, self.width() - 8), max(120, self.height() - 8)
+
+    def _refresh_display(self):
+        bw, bh = self._display_box_size()
+        if self._preview_bgr is not None:
+            self.setPixmap(_bgr_to_fit_pixmap(self._preview_bgr, bw, bh))
+            return
+        if self._source_px is not None and not self._source_px.isNull():
+            self.setPixmap(_fit_pixmap_contain(self._source_px, bw, bh))
+            return
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self._path is not None or self._preview_bgr is not None:
+            self._refresh_display()
+
+    def set_preview_image(self, img_bgr: np.ndarray | None):
+        """Yüz tespiti sonrası önizleme (oran korunur)."""
+        self._preview_bgr = img_bgr
+        if img_bgr is not None:
+            self._refresh_display()
+            self.setStyleSheet(f"""
+                QLabel {{
+                    border: 1.5px solid {ACCENT};
+                    border-radius: 16px;
+                    background: {SURFACE};
+                }}
+            """)
+
     def _load(self, path: str):
         self._path = path
+        self._preview_bgr = None
         px = QPixmap(path)
         if not px.isNull():
-            px = px.scaled(
-                self.width() - 4, self.height() - 4,
-                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                Qt.TransformationMode.SmoothTransformation
-            )
-            off_x = max(0, (px.width()  - self.width()  + 4) // 2)
-            off_y = max(0, (px.height() - self.height() + 4) // 2)
-            px = px.copy(off_x, off_y, self.width() - 4, self.height() - 4)
-            self.setPixmap(px)
+            self._source_px = px
+            self._refresh_display()
             self.setStyleSheet(f"""
                 QLabel {{
                     border: 1.5px solid {ACCENT};
@@ -372,6 +425,8 @@ class PhotoZone(QLabel):
 
     def clear(self):
         self._path = None
+        self._source_px = None
+        self._preview_bgr = None
         self._empty()
 
 
@@ -408,13 +463,14 @@ class AddCriminalPage(QWidget):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        # ── Sol: Fotoğraf Paneli ─────────────────────────────────────────
+        # ── Sol: Fotoğraf Paneli (geniş) ─────────────────────────────────
         left = QWidget()
-        left.setFixedWidth(380)
+        left.setMinimumWidth(440)
+        left.setMaximumWidth(920)
         left.setStyleSheet(f"background: {BG_PANEL}; border-right: 1px solid {BORDER};")
         ll = QVBoxLayout(left)
-        ll.setContentsMargins(36, 40, 36, 40)
-        ll.setSpacing(20)
+        ll.setContentsMargins(28, 36, 28, 36)
+        ll.setSpacing(16)
 
         # Başlık
         p_title = QLabel("Fotoğraf")
@@ -427,9 +483,10 @@ class AddCriminalPage(QWidget):
         sub.setStyleSheet(f"color: {TEXT_2};")
         ll.addWidget(sub)
 
-        # Drop zone
+        # Drop zone — dikey alanda geniş, görsel oran korunarak sığar
         self._photo = PhotoZone()
-        self._photo.setMinimumHeight(300)
+        self._photo.setMinimumHeight(340)
+        self._photo.setMinimumWidth(360)
         self._photo.photo_selected.connect(self._on_photo)
         ll.addWidget(self._photo, 1)
 
@@ -444,12 +501,13 @@ class AddCriminalPage(QWidget):
         btn_clr.clicked.connect(self._clear)
         ll.addWidget(btn_clr)
 
-        root.addWidget(left)
+        root.addWidget(left, 3)
 
-        # ── Sağ: Form ────────────────────────────────────────────────────
+        # ── Sağ: Form (daha dar) ─────────────────────────────────────────
         right = QWidget()
+        right.setMaximumWidth(520)
         rl = QVBoxLayout(right)
-        rl.setContentsMargins(48, 40, 48, 40)
+        rl.setContentsMargins(32, 36, 36, 36)
         rl.setSpacing(0)
 
         r_title = PageTitle("Kişi Ekle")
@@ -607,26 +665,7 @@ class AddCriminalPage(QWidget):
         self._on_face_selected(target_idx)
 
     def _set_preview(self, img_bgr: np.ndarray):
-        rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-        h, w, ch = rgb.shape
-        qimg = QImage(rgb.data, w, h, ch * w, QImage.Format.Format_RGB888).copy()
-        px = QPixmap.fromImage(qimg)
-        px = px.scaled(
-            self._photo.width() - 4, self._photo.height() - 4,
-            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-            Qt.TransformationMode.SmoothTransformation
-        )
-        off_x = max(0, (px.width() - self._photo.width() + 4) // 2)
-        off_y = max(0, (px.height() - self._photo.height() + 4) // 2)
-        px = px.copy(off_x, off_y, self._photo.width() - 4, self._photo.height() - 4)
-        self._photo.setPixmap(px)
-        self._photo.setStyleSheet(f"""
-            QLabel {{
-                border: 1.5px solid {ACCENT};
-                border-radius: 16px;
-                background: {SURFACE};
-            }}
-        """)
+        self._photo.set_preview_image(img_bgr)
 
     def _on_face_selected(self, _idx: int):
         self._emb = None

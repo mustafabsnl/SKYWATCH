@@ -14,9 +14,9 @@ class DecisionEngine:
         self._logger = logger
         # Duruma göre BGR renk kodları (OpenCV için)
         self.colors = {
-            "CLEAN": (0, 255, 0),        # Yeşil
-            "CRIMINAL": (0, 204, 255),   # Sarı/Turuncu
-            "WANTED": (0, 0, 255),       # Kırmızı
+            "CLEAN": (255, 140, 40),    # Mavi ton (BGR) — overlay legend ile uyumlu
+            "CRIMINAL": (0, 204, 255),  # Turuncu
+            "WANTED": (0, 0, 255),      # Kırmızı
             "SUSPICIOUS": (255, 0, 255), # Mor (hızlı/şüpheli hareket)
             "UNKNOWN": (200, 200, 200),  # Gri
             "FACE": (0, 220, 220),
@@ -25,8 +25,8 @@ class DecisionEngine:
             "TRACKING": (180, 180, 0),
             "TARGET_FOUND": (0, 255, 255),
             "HEDEF BULUNDU": (0, 255, 255),
-            "TEMIZ": (0, 255, 0),
-            "TEMİZ": (0, 255, 0),
+            "TEMIZ": (255, 140, 40),
+            "TEMİZ": (255, 140, 40),
         }
         self.current_mode = "GENERAL"
         self.target_person_id = None

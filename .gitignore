@@ -1,6 +1,6 @@
-# SKYWATCH - minimal/prod .gitignore
+# SKYWATCH .gitignore
 
-# Python
+# ── Python ────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
 *.pyo
@@ -10,14 +10,15 @@ __pycache__/
 build/
 dist/
 
-# Virtual env
+# ── Virtual env ──────────────────────────────────────────
 venv/
 .venv/
 env/
 ENV/
 .env
 
-# IDE / OS
+# ── IDE / OS ─────────────────────────────────────────────
+.vs/
 .vscode/
 .idea/
 *.swp
@@ -26,51 +27,64 @@ ENV/
 Thumbs.db
 desktop.ini
 
-# Runtime outputs
+# ── Runtime outputs ──────────────────────────────────────
 logs/
 *.log
 tmp/
 .cache/
 
-# Local database / user assets
+# ── Local database / user assets ─────────────────────────
 database/skywatch.db
 database/photos/
 
-# Models / checkpoints
-models/
-checkpoints/
+# ── Model weights / checkpoints ──────────────────────────
+best.pt
+*.pt
 *.pth
 *.onnx
 *.engine
 *.tflite
 *.torchscript
+/models/
+checkpoints/
 
-# Training / experiment outputs
+# ── Training / experiment outputs ────────────────────────
 runs/
 wandb/
 src/model/runs/
 
-# Datasets and archives
+# ── Datasets and archives ───────────────────────────────
 VeriSeti/
 dataset_yolo/
 data/
 datasets/
 archive/
-Kalabalık_yuz_veri_seti/
 skywatch_wider/
 *.zip
 *.tar
 *.tar.gz
 *.7z
 
-# Local camera/video assets (DO NOT push)
+# ── Local camera/video assets ───────────────────────────
 Kameralar/
 *.mp4
 *.webm
 *.avi
 *.mov
 
-# Local extras
+# ── Kişisel notlar / dokümanlar / sunumlar ───────────────
+MAKALELER.txt
+ÖNEMLİNOT.txt
+SKYWATCH_RAPOR.docx
+*.pdf
+*.pptx
+*.ppt
+*.docx
+*.doc
+
+# ── Local extras ────────────────────────────────────────
 ultralytics_skywatch/
 tools/__pycache__/
-SKYWATCH_RAPOR.docx
+
+# ── Gemini / AI assistant ───────────────────────────────
+.gemini/
